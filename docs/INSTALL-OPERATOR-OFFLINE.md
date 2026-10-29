@@ -1,8 +1,8 @@
-# Trident Port v1.2.3: install by operator, offline (Kubernetes)
+# Trident Port v1.2.4: install by operator, offline (Kubernetes)
 
 Your own registry (Harbor or similar); nothing is pulled from `ghcr.io`. Run every block in order, top to bottom, in the same shell. Every block can be pasted as it is: the only values you change are in step 1, once.
 
-Images carried by the bundle: `ghcr.io/calzdevops/trident-port:v1.2.3`, `ghcr.io/calzdevops/trident-port-operator:v1.2.3`, `curlimages/curl:8.11.0` (linux/amd64).
+Images carried by the bundle: `ghcr.io/calzdevops/trident-port:v1.2.4`, `ghcr.io/calzdevops/trident-port-operator:v1.2.4`, `curlimages/curl:8.11.0` (linux/amd64).
 
 ## Requirements
 
@@ -14,20 +14,20 @@ Images carried by the bundle: `ghcr.io/calzdevops/trident-port:v1.2.3`, `ghcr.io
 
 ## 0. Get the two files
 
-`trident-port-offline-v1.2.3.tar.gz` (~350 MB) and `trident-port-offline-v1.2.3.tar.gz.sha256`, from NetApp or from the GitHub Release `v1.2.3`. Put both in an empty working folder and `cd` into it.
+`trident-port-offline-v1.2.4.tar.gz` (~350 MB) and `trident-port-offline-v1.2.4.tar.gz.sha256`, from NetApp or from the GitHub Release `v1.2.4`. Put both in an empty working folder and `cd` into it.
 
 With a GitHub token that can read the release (typed, not shown):
 
 ```bash
 read -rsp "GitHub token: " GH_TOKEN; echo
 API=https://api.github.com/repos/CalzDevOps/trident-port
-for f in trident-port-offline-v1.2.3.tar.gz trident-port-offline-v1.2.3.tar.gz.sha256; do
-  id=$(curl -s -H "Authorization: Bearer $GH_TOKEN" $API/releases/tags/v1.2.3 \
+for f in trident-port-offline-v1.2.4.tar.gz trident-port-offline-v1.2.4.tar.gz.sha256; do
+  id=$(curl -s -H "Authorization: Bearer $GH_TOKEN" $API/releases/tags/v1.2.4 \
        | python3 -c "import sys,json; print([a['id'] for a in json.load(sys.stdin)['assets'] if a['name']=='$f'][0])")
   curl -sL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$f" $API/releases/assets/$id
 done
 unset GH_TOKEN
-ls -la trident-port-offline-v1.2.3.tar.gz*
+ls -la trident-port-offline-v1.2.4.tar.gz*
 ```
 
 Expected: two files, the `.tar.gz` around 350 MB.
@@ -37,7 +37,7 @@ Expected: two files, the `.tar.gz` around 350 MB.
 Change the right-hand side of each line to your own value, then paste the block.
 
 ```bash
-export VERSION=v1.2.3
+export VERSION=v1.2.4
 export MIRROR_HOST=harbor.example.com          # your registry host
 export MIRROR=$MIRROR_HOST/trident-port        # your registry host / your project
 export REGISTRY_USER=robot-trident-port        # your registry user
