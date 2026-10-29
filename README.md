@@ -149,22 +149,21 @@ and Strimzi native routes.
 | Area | Where | Result |
 |---|---|---|
 | Install through the operator | RKE2 v1.32, built from scratch with the operator (14 Oct) | Web interface and API answer; a read-only bulk plan (`tp live-sync start --namespaces`) runs and changes nothing. The operator install is also validated on k3s |
-| Live sync, many namespaces | OpenShift (13 Oct) | `2 of 2 namespace(s) syncing with the applications running`; cutover of 3 claims in a 3m54s window, a file modified after the sync identical on both sides |
-| Live sync, window of 10 namespaces | OpenShift (9 Oct) | 10 of 10 migrated in 15m29s wall clock, 2m12s to 3m46s stopped per namespace |
-| vSphere CSI source to ONTAP NAS | k3s (14 Oct) | Live-sync cutover window 2m02s: stop 35s, final delta 37s, swap 11s, restart 5s |
+| Live sync, many namespaces | OpenShift (13 Oct) | `2 of 2 namespace(s) syncing with the applications running`; cutover of 3 claims, a file modified after the sync identical on both sides |
+| Live sync, window of 10 namespaces | OpenShift (9 Oct) | 10 of 10 namespaces migrated |
+| vSphere CSI source to ONTAP NAS | k3s (14 Oct) | Live-sync cutover: stop, final delta, swap and restart; application serving after the cut |
 | Argo CD (real instance) | OpenShift (13 and 14 Oct) | Application suspended during the migration; Git change delivered as a patch; sync policy restored by `tp gitops resume`; StatefulSet recreated with its claim template on the new class |
 | Elasticsearch on ECK | OpenShift (13 Oct) | Moved through new node sets with no outage; Elasticsearch Ready |
-| Kafka on Strimzi | OpenShift (13 Oct) | Broker pool moved through a new pool, 51 partitions in 1m11s, Kafka Ready; controller pool moved with Kafka stopped in 6m53s, or 4m37s with live sync, Kafka Ready |
+| Kafka on Strimzi | OpenShift (13 Oct) | Broker pool moved through a new pool, Kafka Ready; controller pool moved with Kafka stopped, or with live sync, Kafka Ready |
 | OpenShift security context constraint | OpenShift (13 and 14 Oct) | The product binds its own SCC for the copy pods and returns it when the run ends |
-| Live sync of several namespaces with the cutover in windows | RKE with a virtual ONTAP (18 Oct) | 3 namespaces with the applications running, cut over in 2 windows, one namespace rolled back. Real windows 1m42s, 1m27s and 1m27s against about 1m29s to 1m37s estimated; sha256, owner and mode identical in 203 of 203 entries per namespace; the applications serve after the cut and after the rollback |
+| Live sync of several namespaces with the cutover in windows | RKE with a virtual ONTAP (18 Oct) | 3 namespaces with the applications running, cut over in 2 windows, one namespace rolled back. sha256, owner and mode identical in 203 of 203 entries per namespace; the applications serve after the cut and after the rollback |
 | Copy pods on a node with SELinux Enforcing | RKE on RHEL 9.6 (18 Oct) | Bulk live sync in a `restricted` namespace reached READY with 100 % copied and no `Permission denied`; the previous build failed with `Permission denied` |
-| Namespaces with 63-character names | RKE with a virtual ONTAP (19 Oct) | Live-sync cutover in 127 s with identical sha256 and modes, rollback with identical data; 0 illegal label values out of 16 checked |
-| Snapshot plus live sync (combo) | RKE with a virtual ONTAP (18 Oct) | `baseline`, `restricted` and `privileged` namespaces pass; the report reads `2 of 2`; rollback, modes and sha256 identical. Cutover by command line: window 2m38s against 2m47s estimated |
+| Namespaces with 63-character names | RKE with a virtual ONTAP (19 Oct) | Live-sync cutover with identical sha256 and modes, rollback with identical data; 0 illegal label values out of 16 checked |
+| Snapshot plus live sync (combo) | RKE with a virtual ONTAP (18 Oct) | `baseline`, `restricted` and `privileged` namespaces pass; the report reads `2 of 2`; rollback, modes and sha256 identical. |
 | Block cutover (SAN) | RKE with a virtual ONTAP (18 Oct) | Longhorn to a SAN class from the command line: start, status, cutover and rollback, md5 of 32 MiB identical |
 | Argo CD app-of-apps | RKE (18 Oct) | `tp gitops resume --yes` restores child and parent; a second `resume` ends rc 0 with `Nothing to resume`. A rollback of an application with `selfHeal` is refused (rc 3) before anything is stopped; with `--allow-gitops` it suspends and reverts |
 | Rollback and session handling | RKE (18 Oct) | `tp rollback --to-source` acts on the session that holds the destination with 3 `ROLLED_BACK` and 1 `COMPLETED` sessions; a recreated namespace starts a new session; source and destination on the same backend are refused |
-| Speed | RKE (18 Oct) | Pre-flight 5.6 s for one pair and 6.8 s for three; `bulk/status` over 22 namespaces 3.5 s |
-| Previous modes | RKE with a virtual ONTAP (18 Oct) | Copy rc 0 in 185 s with 7339 lines and md5 intact; live-sync start 45 s, cutover 128 s, real window 1m22s |
+| Previous modes | RKE with a virtual ONTAP (18 Oct) | Copy rc 0 with md5 intact; live-sync start and cutover pass |
 | Uninstall | RKE (18 Oct) | No cutover Lease left after `helm uninstall` |
 | Extended attributes | OpenShift (13 and 14 Oct) | With `--copy-xattrs`, a `user.*` attribute set on the source is read on the new volume (`tp live-sync`, `tp migrate`, `tp auto`) |
 | vSphere CSI to ONTAP NAS, bulk live sync | k3s with vSphere CSI (28 and 29 Oct) | Bulk start over 14 namespaces with the applications running (Argo CD, RabbitMQ, Keycloak, 10 StatefulSets); 9 namespaces cut over in one bulk cutover, labels and annotations unchanged |
@@ -504,8 +503,8 @@ used; each has its own route, online for Elasticsearch and Kafka brokers.
 | Workload | Command | Route | Measured |
 |---|---|---|---|
 | Elasticsearch (ECK) | `tp eck-nodeset` | new node sets on the destination class, old ones retired once the cluster is ready; old volumes set to `Retain` first | Elasticsearch Ready after the move, no outage |
-| Kafka brokers (Strimzi) | `tp strimzi-pool` | a new `KafkaNodePool` on the destination class; partitions move by Cruise Control or by Kafka's own reassignment, then the old pool is removed | 51 partitions in 1m11s, Kafka Ready |
-| Kafka controllers (Strimzi) | `tp strimzi-stopped` | Kafka paused, same nodes copied to the destination class and swapped, then resumed | 6m53s; 4m37s with `--live-sync`; Kafka Ready after each |
+| Kafka brokers (Strimzi) | `tp strimzi-pool` | a new `KafkaNodePool` on the destination class; partitions move by Cruise Control or by Kafka's own reassignment, then the old pool is removed | Kafka Ready |
+| Kafka controllers (Strimzi) | `tp strimzi-stopped` | Kafka paused, same nodes copied to the destination class and swapped, then resumed | Kafka Ready, stopped or with `--live-sync` |
 
 In a namespace that also holds other claims, these claims take their route and the
 rest follow the chosen mode in the same run. Each command has `plan` and `status`.
@@ -613,7 +612,7 @@ it is changed.
 
 For a StatefulSet, `tp gitops sts-vct --session <id> --yes` recreates it with its
 `volumeClaimTemplates` on the new class (pods and claims stay); Argo CD recreated it
-from Git in about 20 s, Synced and Healthy.
+from Git, Synced and Healthy.
 
 For several namespaces at once, `--namespaces a b c` replaces `--session`, and
 `tp gitops bundle --all --out <dir>` writes one change per repository for every
@@ -717,29 +716,16 @@ ahead of a migration window rather than discovered during one:
 
 ## Performance and Sizing
 
-**Figures below are measured, not projected, and scoped to the environment in
-which they were captured.** From validation against a vSphere CSI → Trident
-environment, one representative dataset:
-
-| Mode | Measured Cutover Window | Scales With Dataset Size |
-|---|---|---|
-| Offline copy | 155 s | Yes: the entire transfer occurs inside the window |
-| Snapshot | 65 s | No, predominantly fixed cost, only the final delta is inside the window |
-| Swap, per volume | 6 s floor | No: a pointer repoint, not a data transfer |
-
-- **Live sync on vSphere CSI → ONTAP NAS (k3s, 14 Oct 2026):** cutover window 2m02s
-  (stop 35s, final delta 37s, swap 11s, restart 5s).
 - **Offline copy places the entire transfer inside the cutover window**: window
   duration scales with dataset size.
-- **Snapshot and live-sync remove the bulk transfer from the cutover window**:
-  the window is dominated by the final delta, largely independent of total
-  volume size.
-- **SnapMirror cuts by FlexVol, not by individual claim**: on economy storage
-  classes, namespaces sharing a FlexVol are cut together in a single array
-  operation (see FlexVol-sharing behavior under [The Methods](#the-methods)).
+- **Snapshot and live sync remove the bulk transfer from the cutover window**: the
+  window is dominated by the final delta.
+- **SnapMirror cuts by FlexVol, not by individual claim**: on economy storage classes,
+  namespaces sharing a FlexVol are cut together (see [The Methods](#the-methods)).
 
-For sizing guidance specific to a customer's dataset and topology, engage your
-Trident Port contact for a scoped assessment.
+The pre-flight and the plan estimate the window for each namespace from this cluster's
+own measurements. For sizing against a specific dataset, ask your Trident Port contact
+for an assessment.
 
 ---
 
