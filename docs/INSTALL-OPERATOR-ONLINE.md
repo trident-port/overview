@@ -1,4 +1,4 @@
-# Trident Port v1.2.3: install by operator, online (Kubernetes)
+# Trident Port v1.2.4: install by operator, online (Kubernetes)
 
 The cluster reaches `ghcr.io` and you hold a token of ours. Run every block in order, top to bottom, in the same shell. Every block can be pasted as it is: the only values you change are in step 1, once. No registry of your own: `INSTALL-OPERATOR-OFFLINE.md`.
 
@@ -13,15 +13,15 @@ Images (published at the version you set in step 1): `ghcr.io/calzdevops/trident
 
 ## 0. Get the file
 
-`trident-port-operator-v1.2.3.tar.gz`, from NetApp or from the GitHub Release `v1.2.3`. Put it in an empty working folder and `cd` into it.
+`trident-port-operator-v1.2.4.tar.gz`, from NetApp or from the GitHub Release `v1.2.4`. Put it in an empty working folder and `cd` into it.
 
 With a GitHub token that can read the release (typed, not shown):
 
 ```bash
 read -rsp "GitHub token: " GH_TOKEN; echo
 API=https://api.github.com/repos/CalzDevOps/trident-port
-f=trident-port-operator-v1.2.3.tar.gz
-id=$(curl -s -H "Authorization: Bearer $GH_TOKEN" $API/releases/tags/v1.2.3 \
+f=trident-port-operator-v1.2.4.tar.gz
+id=$(curl -s -H "Authorization: Bearer $GH_TOKEN" $API/releases/tags/v1.2.4 \
      | python3 -c "import sys,json; print([a['id'] for a in json.load(sys.stdin)['assets'] if a['name']=='$f'][0])")
 curl -sL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$f" $API/releases/assets/$id
 unset GH_TOKEN
@@ -35,7 +35,7 @@ Expected: one `.tar.gz` file.
 Change the right-hand side of each line to your own value, then paste the block.
 
 ```bash
-export VERSION=v1.2.3
+export VERSION=v1.2.4
 export TRACKING_SC=sc-nas-retain               # your StorageClass for the tracking volume
 export TRIDENT_NS=trident                      # namespace where Trident runs
 export REG_USER=my-ghcr-user                   # your registry user, the one you were given
