@@ -186,7 +186,7 @@ The step-by-step guides ship inside those files and are also here:
 [`docs/INSTALL-OPERATOR-ONLINE.md`](docs/INSTALL-OPERATOR-ONLINE.md). Every block in
 them can be pasted as it is. You edit your own values once, at the start.
 
-Current release: **v1.2.3**.
+Current release: **v1.2.4**.
 
 ### Before you start
 
