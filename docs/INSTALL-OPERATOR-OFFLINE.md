@@ -507,7 +507,7 @@ grep -n -A7 'openshift:' tridentport.mirror.yaml
 Result: `grep` prints `openshift:`, then `enabled: true`, then the three names `copyNfsScc:`, `nfsImportScc:` and `blockMirrorScc:`, each followed by `create: false`. If it prints nothing, the file has no `spec:` line on its own: start step 9 again from its first block.
 
 
-**Argo CD in another cluster (optional).** If an Argo CD hub that runs in another cluster manages this one, give the product its kubeconfig, or the product cannot suspend the Applications and the hub puts a stopped workload back. Create a Secret in the `trident-port` namespace that holds the hub kubeconfig (the Secret holds it under the key `kubeconfig`), and name it in the `TridentPort` under `spec.argocdHub` (add it under `spec:` in `tridentport.mirror.yaml`, which the next block applies). The fields are `existingSecret` (the Secret name, required for this feature), `key` (the key in the Secret, default `kubeconfig`), `context` (a context inside the kubeconfig, optional) and `namespace` (where Argo CD runs, default `argocd`). Without `existingSecret` the product pod has no Argo CD settings, and the guide behaves as it does today. Create the Secret before you apply the resource; the example `examples/tridentport-private-registry.yaml` in the bundle carries the block commented out. The hub account needs only `get`, `list` and `patch` on `applications` and `applicationsets`: see "Argo CD in another cluster" in `MIGRATE-A-CLUSTER.md`.
+**Argo CD in another cluster (optional).** If an Argo CD hub that runs in another cluster manages this one, give the product its kubeconfig, or the product cannot suspend the Applications and the hub puts a stopped workload back. Create a Secret in the `trident-port` namespace that holds the hub kubeconfig (the Secret holds it under the key `kubeconfig`), and name it in the `TridentPort` under `spec.argocdHub` (add it under `spec:` in `tridentport.mirror.yaml`, which the next block applies). The fields are `existingSecret` (the Secret name, required for this feature), `key` (the key in the Secret, default `kubeconfig`), `context` (a context inside the kubeconfig, optional) and `namespace` (where Argo CD runs, default `argocd`). Without `existingSecret` the product pod has no Argo CD settings, and nothing changes. Create the Secret before you apply the resource. The example `examples/tridentport-private-registry.yaml` in the bundle carries the block commented out. The hub account needs only `get`, `list` and `patch` on `applications` and `applicationsets`: see "Argo CD in another cluster" in `MIGRATE-A-CLUSTER.md`.
 
 ```bash
 {
@@ -559,7 +559,7 @@ API_TOKEN=$(kubectl -n trident-port get secret trident-port-api-token -o jsonpat
 echo "http://$NODE_IP:$NODE_PORT"
 ```
 
-Result: the block prints the web address, `http://` followed by the node IP and port. If the secret returns `NotFound`, the product pod is not Ready yet. Repeat the `rollout status` command of step 9. The web `NodePort` is chosen by Kubernetes when the service is created, so after a reinstall it is usually another number: use the one this block prints, and tell whoever has the old address bookmarked or a firewall rule on it. To keep a fixed port, add `service:` with `nodePort: <port>` under `spec:` in the `TridentPort` of step 9 (the port must be inside the cluster's NodePort range, 30000-32767 by default) and apply it again; the operator changes the service. Not measured on a cluster.
+Result: the block prints the web address, `http://` followed by the node IP and port. If the secret returns `NotFound`, the product pod is not Ready yet. Repeat the `rollout status` command of step 9. The web `NodePort` is chosen by Kubernetes when the service is created, so after a reinstall it is usually another number: use the one this block prints, and tell whoever has the old address bookmarked or a firewall rule on it. To keep a fixed port, add `service:` with `nodePort: <port>` under `spec:` in the `TridentPort` of step 9 (the port must be inside the cluster's NodePort range, 30000-32767 by default) and apply it again. The operator changes the service. Not measured on a cluster.
 
 ```bash
 curl -s -X POST "http://$NODE_IP:$NODE_PORT/api/license" -H "X-Trident-Port-Token: $API_TOKEN" \
@@ -657,7 +657,7 @@ kubectl -n trident-port patch tridentport trident-port --type merge -p '{"spec":
 }
 ```
 
-Result: the first command prints `deployment.apps/trident-port-operator patched` and the second prints `tridentport.trident-port.netapp.io/trident-port patched`. The first is for the operator pod, the second for the product pod. If a pod is already stuck, `kubectl -n trident-port-system get events --field-selector reason=FailedScheduling` (and the same with `-n trident-port`) shows `Insufficient cpu`; the same commands unblock it. The operator install file sets the operator request again each time you apply it, so lower it again after an operator upgrade if the node is still full.
+Result: the first command prints `deployment.apps/trident-port-operator patched` and the second prints `tridentport.trident-port.netapp.io/trident-port patched`. The first is for the operator pod, the second for the product pod. If a pod is already stuck, `kubectl -n trident-port-system get events --field-selector reason=FailedScheduling` (and the same with `-n trident-port`) shows `Insufficient cpu`. The same commands unblock it. The operator install file sets the operator request again each time you apply it, so lower it again after an operator upgrade if the node is still full.
 
 Upgrade the operator first, because it carries the RBAC that the new product needs:
 
@@ -804,7 +804,7 @@ date -d '+720 hours' +%F
 }
 ```
 
-Result: the third command prints the token, and the last one prints the date on which it stops working. **Write that date down: renew before it.** The cluster may cap the duration to a lower value; then use the cap. The push of step 5 still uses your own login.
+Result: the third command prints the token, and the last one prints the date on which it stops working. **Write that date down: renew before it.** The cluster may cap the duration to a lower value. In that case use the cap. The push of step 5 still uses your own login.
 
 To renew, run the `create token` command again and replace both secrets (the namespaces are `trident-port-system` and `trident-port`):
 

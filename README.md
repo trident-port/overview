@@ -1,4 +1,3 @@
-
 # Trident Port
 
 > **Sailing to a Safe Harbor.** Move Kubernetes persistent volumes from any storage
@@ -6,89 +5,76 @@
 
 ---
 
-## Architecture & Capabilities
+## What it is, and who it is for
 
-Trident Port moves the data behind a `PersistentVolumeClaim` onto a
-Trident-provisioned volume, then repoints the application at it, stopping what
-holds the claim, in the correct order, and restoring it once the cutover completes.
+Many Kubernetes clusters keep their data on storage that the team no longer wants to
+run: an NFS server, Longhorn, Ceph, local disks, vSphere volumes. When the plan is to
+standardise on NetApp, the question is always the same. How do you move the data
+behind hundreds of volumes without losing any of it, and without an outage nobody
+agreed to?
 
-**Source:** any provisioner: NFS subdir, Longhorn, Rook/Ceph (RBD and CephFS),
-local-path, OpenEBS, vSphere CSI, Portworx, hand-made PVs, and Trident itself.
+Trident Port answers that question. It copies the data behind each
+`PersistentVolumeClaim` onto a volume provisioned by NetApp Trident, then points the
+application at the new volume. It stops what holds the claim, in the right order, and
+starts it again when the move is done.
 
-**Destination:** any Trident backend: `ontap-nas`, `ontap-nas-economy`,
-`ontap-nas-flexgroup`, `ontap-san`, `ontap-san-economy`, `azure-netapp-files`,
-FSx for ONTAP.
+It is written for the people who own the platform: infrastructure leads, storage
+administrators and the architects who have to sign off a migration plan.
 
-### How Long the Application Stops
+**Where it can read from:** NFS subdir, Longhorn, Rook/Ceph (RBD and CephFS),
+local-path, OpenEBS, vSphere CSI, Portworx, hand-made volumes, and Trident itself.
 
-The destination volume is created and filled ahead of time, and the application is
-moved onto it in a planned, bounded window. The methods differ in how much of the copy
-happens before that window:
+**Where it can write to:** any Trident backend. That means `ontap-nas`,
+`ontap-nas-economy`, `ontap-nas-flexgroup`, `ontap-san`, `ontap-san-economy`,
+`azure-netapp-files` and FSx for ONTAP.
 
-| Method | The application, from start to finish |
-|---|---|
-| **Offline copy** | `████████████████████████` |
-| **Snapshot** | `░░░░░░░░░░░░░░░░░░░░░░░█` |
-| **Live sync** | `█░░░░░░░░░░░░░░░░░░░░░░█` |
-| **SnapMirror** | `░░░░░░░░░░░░░░░░░░░░░░░█` |
-| **Block cutover** (`start`/`cutover`) | `█░░░░░░░░░░░░░░░░░░░░░░█` |
+### What it guarantees
 
-`░` the application is up and serving · `█` it is down
-
-Offline copy does the whole transfer inside the cutover window. The other methods do
-it before the window, and each needs something in return (see the table below). Live
-sync usually copies from a separate pod with the application running. A
-ReadWriteOncePod volume needs one restart at `start` to add a sidecar. Block cutover
-has two short windows: one to repoint the application onto the mirror, one to switch
-when the resync is done.
-
----
-
-## The Methods
-
-| Method | Application stopped for | Touches the array | Requires |
-|---|---|---|---|
-| **Offline copy** (`copy`) | the full transfer | no | nothing beyond a destination claim |
-| **Snapshot** (`snapshot`) | the final delta only | no | a `VolumeSnapshotClass` whose driver matches the source provisioner, and a filesystem volume |
-| **Live sync** (`live-sync`) | the final cut (plus one restart at `start` for a ReadWriteOncePod volume) | no, but a continuous read on the source | Kubernetes 1.29+, a filesystem volume, and room to inject a sidecar |
-| **SnapMirror** (`snapmirror`) | the break and the mount | yes: the transfer competes with production I/O on the same aggregates | ONTAP at both ends, cluster peering, credentials on both |
-| **Block cutover** (`block-cutover`) | two brief windows (repoint, then switch) or the switch only, without `start`/`cutover` | no, but a device-level resync on the node | a raw `Block` volume already on a node, and a destination claim |
-
-`tp import` adopts an existing NFS export into a Trident claim without copying it:
-the source is mounted read-only and never stopped.
-
-The planning engine evaluates every method for the target environment, ranking what
-is available and stating, for anything excluded, the precise reason: *"snapshot is
-unavailable because the source CSI driver does not register a VolumeSnapshotClass."*
-
-**Design considerations:**
-
-- **SnapMirror addresses the economy storage class** (`ontap-nas-economy`,
-  `ontap-san-economy`). Requires Trident **26.06+** (Tech Preview). Pre-flight
-  validates the version rather than failing at cutover.
-- **SnapMirror operates at the FlexVol level, not the individual claim.** On
-  `ontap-*-economy`, several namespaces may share a single FlexVol, and the array
-  performs its delta, break and resize **once per FlexVol**. `--plan-only` identifies
-  which namespaces share a FlexVol.
-- **Three cutover shapes govern how shared FlexVols are handled:**
-  - **`together`** cuts the entire FlexVol in one operation. Every namespace sharing
-    it must be named, `--with-flexvol-neighbours` folds a neighbour in.
-  - **`waves`** cuts one namespace per window, at the cost of fragmenting the
-    estate, a qtree cannot move between FlexVols, so each wave re-copies the
-    FlexVol in full.
-  - **`clonedWaves`** avoids fragmentation cost: one baseline transfer, then each
-    wave cuts over its own FlexClone, a single transfer instead of N, with reduced
-    source-side snapshot retention.
-- **A given build may include a subset of these methods.** *"Not included in this
-  build"* is distinct from *"the target cluster cannot support this."* Offline copy
-  is always available.
-- **Block cutover is never selected automatically**: the only method above that the
-  planning engine skips. An operator names it directly. `tp mixed-cutover` coordinates
-  it with Live Sync when both are needed in the same namespace.
+- **Your original volumes are not deleted.** Before anything else happens they are
+  set to `Retain`, so they outlive their claims. Leftovers are listed for you to
+  reclaim. Nothing is removed unless an operator asks for it.
+- **You can go back.** Every run leaves a session record with its plan, a log per
+  phase and a rollback script. One command returns the application to its original
+  volume.
+- **The stop time is announced as a ceiling.** Before a cutover the product tells
+  you how long the application will be down, and that figure is meant to be an
+  upper bound. In 4 of 4 measurements on a real cluster, covering cutovers and
+  rollbacks, the announced figure covered the real stop.
+- **It refuses rather than guesses.** If the pre-flight checks find a problem
+  (capacity, permissions, versions, a namespace already being migrated), the run
+  stops before anything is created.
+- **It checks the result.** After the copy, source and destination are compared by
+  file counts, sizes and modification times, or byte by byte if you ask for it.
+  Raw block volumes are always compared across the whole device.
 
 ---
 
-## What a Run Does
+## What a migration looks like
+
+A migration moves through six steps. You can pause between them, and every step
+before the cutover happens while the application keeps running.
+
+1. **Assess.** `tp survey` and the web Assessment page look at the cluster and say
+   which volumes can move, by which method, and why. It is read-only. For anything
+   it rules out, it states the exact reason, for example that the source driver
+   registers no snapshot class.
+2. **Plan.** `tp plan` shows what would happen to one namespace, method by method,
+   with an estimate of the stop time based on this cluster's own measurements. A
+   dry run (`--dry-run`) goes through discovery and pre-flight and creates, stops
+   and copies nothing.
+3. **Copy while the application runs.** The destination volumes are created and
+   filled ahead of time. With the live methods, a separate copy pod does this and
+   the application keeps serving.
+4. **Cut over.** This is the only step that stops the application. The workloads
+   are stopped in order, the last changes are copied, the claims are pointed at the
+   new volumes, and the workloads are started again and watched until they serve.
+5. **Validate.** The product compares source and destination and writes a report
+   with the measured duration of every phase. It reads these durations from a
+   permanent trace, so the report does not rest on an estimate.
+6. **Go back, if needed.** `tp rollback --to-source` points the application at its
+   original volume again. This is a reverse migration rather than an undo: data
+   written to the new volume after the cutover stays there, and the product says so
+   before it runs.
 
 ```mermaid
 flowchart TD
@@ -108,120 +94,378 @@ flowchart TD
     style I fill:#c62828,color:#fff
 ```
 
-**The four highlighted stages are the cutover window.** Everything preceding them
-executes with the application running, regardless of method. Every phase records its
-own duration to a permanent trace, and reporting reads that record rather than
-asserting an estimate.
-
-**Source volumes are never deleted.** They are set to `Retain` before anything else
-happens, so they persist beyond their claims. Leftover volumes are surfaced for
-reclamation. Nothing is removed without an explicit operator action.
+The four red stages are the cutover window. Everything before them runs with the
+application up, whatever method you chose.
 
 ---
 
-## Supported and Validated Environments
+## Choosing how to move the data
 
-Trident Port is validated against the following platforms:
+The methods differ in how much of the copy happens before the application stops.
+The planning engine evaluates all of them for your cluster, ranks what is available,
+and gives the reason for anything it excludes.
 
-- **RKE2**
-- **Red Hat OpenShift**
-- **K3s**
-- **Upstream Kubernetes 1.29+** (1.29+ required for live sync's native sidecar support)
-
-| | |
+| Application, from start to finish | |
 |---|---|
-| Kubernetes | any distribution Trident supports · **1.29+** for live sync |
-| NetApp Trident | 24+ · **26.06+** for qtree import in SnapMirror mode |
-| Trident backend | at least one `TridentBackendConfig` bound, provisioning into the destination StorageClass |
-| Credentials | a Kubernetes Secret holding the ONTAP credentials |
-| Registry | offline: your own registry. Online: `ghcr.io` with a read token. The product copies its pull secret into each namespace it migrates, for the run only |
-| Licence | a token bound to the cluster's `kube-system` namespace UID |
+| **Offline copy** | `████████████████████████` |
+| **Snapshot** | `░░░░░░░░░░░░░░░░░░░░░░░█` |
+| **Live sync** | `█░░░░░░░░░░░░░░░░░░░░░░█` |
+| **SnapMirror** | `░░░░░░░░░░░░░░░░░░░░░░░█` |
+| **Block cutover** | `█░░░░░░░░░░░░░░░░░░░░░░█` |
+
+`░` the application is up and serving. `█` it is down.
+
+| Method | Application stopped for | Touches the array | Needs |
+|---|---|---|---|
+| **Offline copy** (`copy`) | the full transfer | no | nothing beyond a destination claim |
+| **Snapshot** (`snapshot`) | the final delta only | no | a `VolumeSnapshotClass` whose driver matches the source provisioner, and a filesystem volume |
+| **Live sync** (`live-sync`) | the final cut, plus one restart at `start` for a ReadWriteOncePod volume | no, but it reads continuously from the source | Kubernetes 1.29+, a filesystem volume, and room to inject a sidecar |
+| **SnapMirror** (`snapmirror`) | the break and the mount | yes, the transfer competes with production I/O on the same aggregates | ONTAP at both ends, cluster peering, credentials on both |
+| **Block cutover** (`block-cutover`) | two brief windows (repoint, then switch), or the switch only without `start` and `cutover` | no, but a device-level resync runs on the node | a raw `Block` volume already on a node, and a destination claim |
+
+Offline copy is always available and does the whole transfer inside the window. Block
+cutover is never chosen automatically. An operator names it, and `tp mixed-cutover`
+coordinates it with live sync when a namespace needs both. A given build may include
+only some of these methods, and the product tells *"not included in this build"*
+apart from *"your cluster cannot support this"*.
+
+`tp import` is a separate case. It adopts an existing NFS export into a Trident claim
+without copying it. The source is mounted read-only and never stopped.
+
+<details>
+<summary>SnapMirror in more detail</summary>
+
+- SnapMirror addresses the economy storage classes (`ontap-nas-economy`,
+  `ontap-san-economy`) and needs Trident **26.06+** (Tech Preview). Pre-flight checks
+  the version, so a mismatch shows up before the cutover.
+- SnapMirror works on a whole FlexVol, not on one claim. On the economy classes,
+  several namespaces can share one FlexVol and the array does its delta, break and
+  resize once for all of them. `--plan-only` shows which namespaces share one.
+- Three cutover shapes handle shared FlexVols:
+  - `together` cuts the whole FlexVol in one operation. Every namespace sharing it
+    must be named, and `--with-flexvol-neighbours` adds a neighbour.
+  - `waves` cuts one namespace per window. The cost is fragmentation: a qtree cannot
+    move between FlexVols, so each wave copies the FlexVol again in full.
+  - `clonedWaves` avoids that cost. It makes one baseline transfer, and each wave then
+    cuts over its own FlexClone, with fewer source snapshots kept.
+
+</details>
 
 ---
 
-## Measured on Real Clusters
+## What has been measured on real clusters
 
-Everything listed here ran against a real cluster and a real ONTAP, with the result
-checked afterwards. Dates are 2026. Rows from October ran on lab builds made during
-the 1.2.x work. Not measured:
-Flux (not supported, Argo CD is) and the rollback of the Elasticsearch
-and Strimzi native routes. Changes made after 1.2.12 are in the next release. Only those listed in the last rows of this table were run on a cluster.
+Everything here ran on a real cluster with a real ONTAP, and the result was checked
+afterwards. The work took place in 2026, on RKE, RKE2, k3s,
+OpenShift and vSphere clusters. Changes made after release 1.2.12 are not covered.
 
-| Area | Where | Result |
-|---|---|---|
-| Install through the operator | RKE2 v1.32, built from scratch with the operator (14 Oct) | Web interface and API answer. A read-only bulk plan (`tp live-sync start --namespaces`) runs and changes nothing. The operator install is also validated on k3s |
-| Live sync, many namespaces | OpenShift (13 Oct) | `2 of 2 namespace(s) syncing with the applications running`. Cutover of 3 claims, a file modified after the sync identical on both sides |
-| Live sync, window of 10 namespaces | OpenShift (9 Oct) | 10 of 10 namespaces migrated |
-| vSphere CSI source to ONTAP NAS | k3s (14 Oct) | Live-sync cutover: stop, final delta, swap and restart. Application serving after the cut |
-| Argo CD (real instance) | OpenShift (13 and 14 Oct) | Application suspended during the migration. Git change delivered as a patch. Sync policy restored by `tp gitops resume`. StatefulSet recreated with its claim template on the new class |
-| Elasticsearch on ECK | OpenShift (13 Oct) | Moved through new node sets with no outage. Elasticsearch Ready |
-| Kafka on Strimzi | OpenShift (13 Oct) | Broker pool moved through a new pool, Kafka Ready. Controller pool moved with Kafka stopped, or with live sync, Kafka Ready |
-| OpenShift security context constraint | OpenShift (13 and 14 Oct) | The product binds its own SCC for the copy pods and returns it when the run ends |
-| Live sync of several namespaces with the cutover in windows | RKE with a virtual ONTAP (18 Oct) | 3 namespaces with the applications running, cut over in 2 windows, one namespace rolled back. sha256, owner and mode identical in 203 of 203 entries per namespace. The applications serve after the cut and after the rollback |
-| Copy pods on a node with SELinux Enforcing | RKE on RHEL 9.6 (18 Oct) | Bulk live sync in a `restricted` namespace reached READY with 100 % copied and no `Permission denied`. The previous build failed with `Permission denied` |
-| Namespaces with 63-character names | RKE with a virtual ONTAP (19 Oct) | Live-sync cutover with identical sha256 and modes, rollback with identical data. 0 illegal label values out of 16 checked |
-| Snapshot plus live sync (combo) | RKE with a virtual ONTAP (18 Oct) | `baseline`, `restricted` and `privileged` namespaces pass. The report reads `2 of 2`. Rollback, modes and sha256 identical. |
-| Block cutover (SAN) | RKE with a virtual ONTAP (18 Oct) | Longhorn to a SAN class from the command line: start, status, cutover and rollback, md5 of 32 MiB identical |
-| Argo CD app-of-apps | RKE (18 Oct) | `tp gitops resume --yes` restores child and parent. A second `resume` ends rc 0 with `Nothing to resume`. A rollback of an application with `selfHeal` is refused (rc 3) before anything is stopped. With `--allow-gitops` it suspends and reverts |
-| Rollback and session handling | RKE (18 Oct) | `tp rollback --to-source` acts on the session that holds the destination with 3 `ROLLED_BACK` and 1 `COMPLETED` sessions. A recreated namespace starts a new session. Source and destination on the same backend are refused |
-| Previous modes | RKE with a virtual ONTAP (18 Oct) | Copy rc 0 with md5 intact. Live-sync start and cutover pass |
-| Uninstall | RKE (18 Oct) | No cutover Lease left after `helm uninstall` |
-| Extended attributes | OpenShift (13 and 14 Oct) | With `--copy-xattrs`, a `user.*` attribute set on the source is read on the new volume (`tp live-sync`, `tp migrate`, `tp auto`) |
-| ApplicationSet children held and released | RKE2 (15 and 16 Oct) | Children held, cutover done, the Git change edits only `storageClassName`, `tp gitops resume --yes` restores automated, selfHeal and prune, the ApplicationSet spec and its md5 identical |
-| Argo Workflows | RKE2 (15 and 16 Oct) | Cutover rc 0 in 55 s, 3 completed Workflow pods deleted before the swap, CronWorkflow restored, md5 identical. A half-swap rollback rc 0 with no write to the Workflow |
-| A foreign volume is never adopted | RKE2 (15 and 16 Oct) | An `Available` volume that belongs to someone else was refused and nothing was copied |
-| `lost+found` in a non-root copy | vSphere (15 and 16 Oct) | Restricted namespace, cutover 1m37s against about 1m40s estimated, md5 identical |
-| First copy in batches | RKE (15 and 16 Oct) | 46 GiB in 19 files at 60 MiB/s with percent and ETA following the bar, cutover 50 s. 150,001 small files (2.6 GB) first copy 12m24s, cutover 67 s |
-| Copy pod size | vSphere (15 and 16 Oct) | 4 GiB at about 112 MiB/s with 2 CPU against about 56 MiB/s at 500m, no throttling |
-| Rollback keeps the claim metadata | vSphere and RKE (15 and 16 Oct) | `last-applied` identical in both directions, provisioner annotations present, copier stopped first, nothing left `Terminating` |
-| API token and webhook certificate | RKE2 (15 and 16 Oct) | One upgraded release, no errors, token read from the Secret only (200 with it, 401 without) |
-| Speed analysis | Lab cluster, 1.2.212 | Run from the command line and from the web, one saved result for both. Against about 20 StorageClasses the run after install stops at 10 minutes and leaves most of them not measured |
-| Window estimate as a ceiling | RKE2, 1.2.215 | The announced figure covered the real stop in 4 of 4 measurements, cutover and rollback |
-| StatefulSet that deletes its own claims | RKE2, 1.2.215 | Official Loki chart with `Delete` on both retention fields: the policy went to `Retain` before the scale to zero, the claim stayed, the migration ended rc 0, the policy went back to `Delete`, 2000 lines kept the same sha256, and the rollback ran the same cycle |
-| Exit 9, done but not ready yet | OpenShift 1.2.212, RKE2 1.2.212 to 1.2.214 | `tp auto --resume`, `tp live-sync cutover`, `tp combo-cutover`, `tp mixed-cutover cutover`, `tp snapmirror --resume` and the web Continue button ended with exit 9 and the session `COMPLETED_NOT_READY` when the application was only slow. `tp block-cutover` was not run |
-| Rollback of a mixed session | RKE2, 1.2.214 | A Strimzi pool and a normal application in one namespace: one `tp rollback --to-source` returned both claims, and 5000 messages and the application sha256 were identical |
-| Run that finds nothing to migrate over a stopped application | RKE2 and OpenShift, 1.2.214 | It names the workloads and `tp start -n`, and exits 1 |
-| ThanosRuler of OpenShift user workload monitoring | OpenShift 1.2.210 | Stopped through the Cluster Monitoring Operator, cut in 2m35s, StatefulSet recreated 2 of 2 on NFS, rules and alert kept. The cut was not repeated |
-| API documentation page | OpenShift, in a browser, 1.2.215 | `/docs` loads Swagger with Authorize and the list of endpoints |
-| vSphere CSI to ONTAP NAS, bulk live sync | k3s with vSphere CSI (28 and 29 Oct) | Bulk start over 14 namespaces with the applications running (Argo CD, RabbitMQ, Keycloak, 10 StatefulSets). 9 namespaces cut over in one bulk cutover, labels and annotations unchanged |
-| Argo CD after the cutover | k3s with vSphere CSI (29 Oct) | Git change from the package, StatefulSet recreated by Argo CD, sync and resume. Same pods, same volumes. Also an ApplicationSet child with 10 StatefulSets |
-| Restricted namespace (OpenShift) | OpenShift 4.21 (28 Oct) | Copy and batch by command line pass in a `restricted` namespace: copy pods without root, destination writable by the application's group |
+**Live sync across many namespaces.** On OpenShift, 2 of 2 namespaces synced with
+their applications running, and a 3-claim cutover left a file modified after the sync
+identical on both sides. A window of 10 namespaces migrated 10 of 10. On a k3s cluster
+with vSphere CSI, a bulk start covered 14 namespaces with the applications running
+(Argo CD, RabbitMQ, Keycloak and 10 StatefulSets), and 9 of them were cut over in one
+bulk cutover with labels and annotations unchanged. On RKE with a virtual ONTAP, 3
+namespaces were cut over in 2 windows and one was rolled back. Checksums, owner and
+mode were identical for 203 of 203 entries in each namespace, and the applications
+served after the cut and after the rollback.
+
+**Snapshot plus live sync together.** Namespaces with the `baseline`, `restricted` and
+`privileged` security levels all passed, with the rollback, modes and checksums
+identical.
+
+**Block cutover to a SAN class.** A Longhorn volume moved to a SAN class from the
+command line (start, status, cutover and rollback) and a 32 MiB test file had the same
+md5 on both sides.
+
+**Security-restricted clusters.** On OpenShift the product binds its own security
+context constraint for the copy pods and returns it when the run ends. Copy and batch
+runs passed in a `restricted` namespace on OpenShift 4.21, with copy pods running
+without root and a destination the application's group can write to. On a node with
+SELinux enforcing (RKE on RHEL 9.6) a bulk live sync reached ready with 100 % copied
+and no `Permission denied`, where the earlier build had failed.
+
+**Edge cases that were run.**
+- Namespaces with 63-character names: cutover and rollback both left identical data.
+- A volume that belongs to someone else (an `Available` volume) was refused and
+  nothing was copied.
+- A first copy of 46 GiB in 19 files ran at 60 MiB/s with a progress bar and
+  estimated time. A first copy of 150,001 small files (2.6 GB) took 12m24s, with a
+  cutover of 67 s.
+- Copy pod size matters. A 4 GiB test reached about 112 MiB/s with 2 CPU, against
+  about 56 MiB/s at 500m.
+- A restricted namespace holding a `lost+found` directory cut over in 1m37s against
+  about 1m40s estimated, with identical md5.
+- With `--copy-xattrs`, an extended attribute set on the source was read on the new
+  volume.
+- A StatefulSet that deletes its own claims (the official Loki chart, with `Delete`
+  on both retention fields) migrated cleanly. The policy went to `Retain` before the
+  stop, the claim stayed, the policy went back to `Delete` afterwards, and 2000 log
+  lines kept the same checksum. The rollback did the same cycle.
+- ThanosRuler in OpenShift's user-workload monitoring was stopped through the Cluster
+  Monitoring Operator and cut in 2m35s. The StatefulSet came back 2 of 2 on NFS with
+  its rules and alert kept. That cutover was run once and not repeated.
+
+**Rollback.** On RKE, `tp rollback --to-source` acted on the right session among
+several, a recreated namespace started a new session, and a source and destination on
+the same backend were refused. Claim metadata was identical in both directions, with
+the copier stopped first and nothing left in `Terminating`. A mixed session (a Strimzi
+pool and a normal application in one namespace) was returned by one command, with 5000
+messages and the application checksum identical.
+
+**Applications that were slow to come back.** `tp auto --resume`,
+`tp live-sync cutover`, `tp combo-cutover`, `tp mixed-cutover cutover`,
+`tp snapmirror --resume` and the web Continue button all ended with exit code 9 and
+the session `COMPLETED_NOT_READY` when the migration was done but the application was
+only slow to start. `tp block-cutover` was not run for this case.
+
+**Installation.** An RKE2 v1.32 cluster built from scratch with the operator
+answered on the web interface and the API, and a read-only bulk plan changed nothing.
+The operator install is also validated on k3s. After `helm uninstall` no cutover lease
+was left behind. One upgraded release ran with no errors, with the API token read from
+the Secret only (200 with it, 401 without).
+
+**Speed analysis.** The measurement of storage speed ran from the command line and
+from the web, with one saved result for both. On a cluster with about 20 StorageClasses
+the run after install stops at 10 minutes and leaves most of them unmeasured.
+
+**The web documentation page.** `/docs` loaded the interactive API reference in a
+browser on OpenShift.
+
+**Not measured.** Flux is not supported (Argo CD is). The rollback of the
+Elasticsearch and Kafka native routes was not run. Operator kinds that are not in the
+validated list below have not been run end to end.
+
+---
+
+## Applications that have an operator
+
+A database or message broker managed by an operator cannot simply be scaled to zero.
+The operator would bring it back, measured at under one second. Trident Port detects
+the operator that owns each workload and stops and restores it through the operator's
+own Custom Resource. The registry knows **44 kinds**, among them PostgreSQL, MongoDB,
+MySQL and MariaDB, Kafka, Elasticsearch, OpenSearch, Redis, Valkey, Cassandra,
+ScyllaDB, CockroachDB, TiDB, ClickHouse, Couchbase, MinIO, etcd, RabbitMQ, Prometheus,
+Alertmanager, ThanosRuler and KubeVirt virtual machines.
+
+The replica count is read and recorded before anything is scaled down. The order of
+trust is an annotation left by an earlier run, then the Custom Resource's own spec,
+then a default of 1. The annotation comes first because an interrupted run can leave
+the spec at zero, and restoring that value would report success for a namespace that
+never returns to service.
+
+An operator that serves other namespaces is never suspended without your say-so.
+`--hold-operator` is your acknowledgement that nothing reconciles there during the
+window.
+
+An unknown Custom Resource that offers a scale subresource is scaled generically, and
+the product says so. Anything else stops with a warning instead of a blind scale.
+
+There are four ways to stop an operator-managed workload.
+
+1. **Native pause** through a dedicated field of the Custom Resource, such as
+   `spec.offline` or `spec.stop`.
+2. **Operator hold.** The operator's Deployment goes to 0 and the StatefulSet is
+   scaled directly. This is used when the Custom Resource refuses `replicas: 0`,
+   which 13 of the 44 kinds do, and it requires `--hold-operator`.
+3. **Zero through the Custom Resource.** The replica field of the resource is
+   patched and the operator scales itself down.
+4. **Orphan and keep the volume.** The owner is deleted with the volume already set to
+   `Retain`. Today this is used for KubeVirt.
+
+### Elasticsearch and Kafka have their own routes
+
+Elasticsearch on ECK refuses a change of storage class on a running claim, and
+Strimzi keeps applying the pool's old class after a swap. For these two, the product
+does not swap volumes. Each has its own command, with `plan` and `status`.
+
+| Workload | Command | Route | Measured |
+|---|---|---|---|
+| Elasticsearch (ECK) | `tp eck-nodeset` | New node sets on the destination class, old ones retired once the cluster is ready. Old volumes are set to `Retain` first | Elasticsearch Ready after the move, no outage |
+| Kafka brokers (Strimzi) | `tp strimzi-pool` | A new `KafkaNodePool` on the destination class. Partitions move by Cruise Control or Kafka's own reassignment, then the old pool is removed | Kafka Ready |
+| Kafka controllers (Strimzi) | `tp strimzi-stopped` | Kafka paused, the same nodes copied to the destination class and swapped, then resumed | Kafka Ready, stopped or with `--live-sync` |
+
+Both were run on OpenShift. In a namespace with other claims, these claims take their
+route and the rest follow the chosen method in the same run.
+
+### Operators validated end to end
+
+Each of these was run from stop to restart on a real cluster. The mechanism numbers
+refer to the four ways above, and `generic` means the unknown-operator path.
+
+| Kind | Mechanism | Kind | Mechanism |
+|---|---|---|---|
+| `Artifactory` | generic | `Milvus` | 3 |
+| `CouchDB` | generic | `MySQLCluster` (MOCO) | 1 |
+| `CrdbCluster` (CockroachDB) | 2 | `MysqlCluster` (Presslabs) | 3 |
+| `Dragonfly` | 3 | `NATS` | generic |
+| `Gitea` | generic | `Neo4j` | generic |
+| `Harbor` | generic | `PerconaServerMongoDB` | 3 |
+| `MariaDB` | 3 | `PerconaXtraDBCluster` | 3 |
+| `RabbitmqCluster` | 3 | `Seaweed` | 2 |
+| `TemporalCluster` | 2 | `VirtualMachine` (KubeVirt) | 4 |
+| `VMCluster` | 1 | `postgresql` (Zalando) | 3 |
+
+That is 20 kinds, plus the two native routes above, 22 validated paths in all.
+
+Two kinds are excluded on purpose. `CephCluster` (Rook) is storage infrastructure,
+like Trident itself, and is not a migration target. `Vault` is excluded because
+moving its Raft store underneath it is a correctness risk. The storage copy itself
+completed cleanly on real hardware, but Vault's seal state still needs its own unseal
+procedure, so a clean copy alone does not give a working handoff.
+
+A few notes on specific kinds:
+
+- A KubeVirt `VirtualMachine` disk moves through a dedicated DataVolume swap
+  (`tp compat kv-dv-swap.sh swap <ns> <vm> <datavolume> <target-pv> <target-sc>`),
+  validated end to end including data integrity inside the guest.
+- `MySQLCluster` (MOCO) is the case where mechanism 1 works as designed, with a
+  dedicated `spec.offline` field and no replica count.
+- `Milvus` and `TemporalCluster` keep their state in dependent services such as etcd
+  and MinIO rather than in the patched component, so their own Custom Resource patch
+  is not exercised in practice. The namespace migration through those services'
+  volumes completed cleanly.
+- `Gitea`, `CouchDB`, `Neo4j`, `NATS`, `Harbor` and `Artifactory` were validated
+  through the generic path, with direct and stated scaling.
+
+The other kinds in the registry have not been run end to end on a cluster, so they are
+not claimed as validated. That includes `CassandraDatacenter` (its stop changed after
+an earlier run and has not been measured since), `ThanosRuler` (cut once on OpenShift,
+see above), `ClickHouseKeeperInstallation`, `OpenshiftArtifactoryHa`, `Keycloak`,
+`NexusRepo`, `Hazelcast` and `ActiveMQArtemis`.
+
+---
+
+## Argo CD and Git
+
+If Argo CD manages a namespace, it would put the old StorageClass back as soon as
+the claims moved. Trident Port suspends the Application for you when it has automated
+sync, moves the claims and prints a session id. Git still names the old class until
+you change it.
+
+1. Run the migration. The run suspends the Application itself.
+2. `tp gitops status --session <id>` lists what is left to change in Git.
+3. `tp gitops bundle --session <id> --out <dir>` writes the change and an `apply.py`
+   that you run inside your own clone, with your own credentials. Then commit, push
+   and merge as you normally do. This is the path for private repositories. For a
+   repository readable without a credential, `tp gitops apply --session <id> >
+   change.patch` produces the same change as a patch for `git am`.
+4. `tp gitops sync --session <id>` prints the Argo CD sync command. Add `--yes` to
+   run it.
+5. `tp gitops resume --session <id> --yes` gives the Application back its automated
+   sync policy.
+
+Trident Port never writes to your repository. The Application stays suspended until
+you resume it.
+
+What the change touches: only the line that holds the old StorageClass. It edits a
+Helm `values.yaml` key, a Kustomize file or a plain YAML manifest, and only when
+exactly one place matches. When it cannot (an Application with several sources or a
+config-management plugin, a layout it does not recognise, or several matching values)
+the change is listed as `unknown`, nothing is edited, and you make it by hand.
+
+For a StatefulSet, `tp gitops sts-vct --session <id> --yes` recreates it with its
+`volumeClaimTemplates` on the new class, and pods and claims stay. For several
+namespaces, `--namespaces a b c` replaces `--session`, and
+`tp gitops bundle --all --out <dir>` writes one change per repository. An Application
+generated by an ApplicationSet is named with its ApplicationSet, and the change goes
+into the ApplicationSet's own source. The same steps are in the web interface, under
+the migration's **Git change** tab and in **Bulk**.
+
+**What was measured.** On OpenShift (October 2026) and on k3s with vSphere CSI
+(October 2026), against a real Argo CD: status, change package, merge, StatefulSet
+recreation, sync and resume. The Application was suspended during the migration, the
+Git change edited only `storageClassName`, and the StatefulSet was recreated by Argo
+CD with its claim template on the new class, Synced and Healthy. An ApplicationSet
+child with 10 StatefulSets went through with the pods not restarted. For an
+app-of-apps, `tp gitops resume --yes` restored child and parent, and a second `resume`
+ended with exit code 0 and `Nothing to resume`. Rolling back an application with
+`selfHeal` is refused with exit code 3 before anything is stopped, and with
+`--allow-gitops` it suspends and reverts. Argo Workflows was run on RKE2 too: a cutover
+in 55 s, 3 completed Workflow pods deleted before the swap, the CronWorkflow restored
+and identical md5.
+
+If Argo CD runs in a different cluster from the one being migrated, the product needs
+that hub's kubeconfig. The install guides cover it.
+
+---
+
+## What survives a cutover
+
+Every **label** on the source claim is carried to the new claim, unfiltered. There is
+no list of supported annotations to keep up to date. Backup labels, GitOps tracking
+ids, KubeVirt markers and cost-centre labels all survive.
+
+Three families of **annotations** are dropped, because they describe the old binding
+and would be wrong on the new one.
+
+| Dropped | Why |
+|---|---|
+| `pv.kubernetes.io/*`, `volume.kubernetes.io/*`, `volume.beta.kubernetes.io/*` | Written by the binding machinery. The API server writes its own on the new claim |
+| `trident.netapp.io/*` | Trident's record of an earlier SnapMirror import. It is true of the volume just imported onto and false of the one being migrated to |
+| `kubectl.kubernetes.io/last-applied-configuration` | Describes the object as declared before the migration. A later `kubectl apply` would compare against a spec that no longer exists |
+
+Each dropped annotation is named in the migration report, so a design decision cannot
+be mistaken for data loss.
 
 ---
 
 ## Installation
 
-Trident Port is installed by its operator. There are two paths, and they end in the same place:
+You do not need to know Kubernetes internals to follow the guides, but you need
+someone with administrator access to the cluster. Trident Port is installed by an
+operator, which is a small program that sets up and looks after the product for you.
 
-| Path | When | What you receive |
+### What NetApp gives you first
+
+Nobody can download Trident Port without being given access. Your NetApp contact
+provides two things.
+
+- **A download link and a download token.** They fetch the installation file.
+- **A read token for the image registry (`ghcr.io`).** The online path uses it to pull
+  the images.
+
+You also need a **licence** for your cluster (see below). The guides say exactly
+when each one is used.
+
+### Pick a path
+
+| Path | Choose it when | What you receive |
 |---|---|---|
-| **Offline** | The cluster cannot reach the internet. Images go into your own registry (Harbor or similar). | `trident-port-offline-<version>.tar.gz` and its `.sha256` (about 360 MB): the three images, `install.yaml`, examples, `load-images.sh` and the guides |
-| **Online** | The nodes can pull from `ghcr.io`. | `trident-port-operator-<version>.tar.gz`, and a read token for `ghcr.io` |
+| **Online** | The cluster nodes can pull images from `ghcr.io`. | `trident-port-operator-<version>.tar.gz`, plus the read token for `ghcr.io` |
+| **Offline** | The cluster cannot reach the internet. The images go into your own registry (Harbor or similar). | `trident-port-offline-<version>.tar.gz` and its `.sha256` file (about 360 MB), holding the three images, `install.yaml`, examples, `load-images.sh` and the guides |
 
-The step-by-step guides ship inside those files and are also here:
-[`docs/INSTALL-OPERATOR-OFFLINE.md`](docs/INSTALL-OPERATOR-OFFLINE.md) and
-[`docs/INSTALL-OPERATOR-ONLINE.md`](docs/INSTALL-OPERATOR-ONLINE.md). Every block in
-them can be pasted as it is. You edit your own values once, at the start.
+Follow the guide for your path. Every block in them can be pasted as it is, and you
+edit your own values once, at the start.
 
-Current release: **v1.2.12**.
+- [`docs/INSTALL-OPERATOR-ONLINE.md`](docs/INSTALL-OPERATOR-ONLINE.md)
+- [`docs/INSTALL-OPERATOR-OFFLINE.md`](docs/INSTALL-OPERATOR-OFFLINE.md)
 
-### Before you start
+The current release is **v1.2.12**.
 
-Per cluster:
+### What your cluster needs
 
-- Kubernetes 1.25 or later, and `cluster-admin` for the install. It creates a CRD, a ClusterRole and a ClusterRoleBinding.
-- Trident 24 or later running, with an online backend.
-- The destination StorageClass(es) on Trident, created by you. Trident Port only selects them.
-- A StorageClass for the tracking volume (2 GiB). It must have reclaim policy `Retain` and must not be a class you will migrate from. A Trident NAS class is recommended.
-- Room on one node for the product pod: it requests 250m CPU / 512 Mi and is limited to 4 CPU / 2 Gi. During a migration, each volume being copied adds a copy pod (request 50m / 64 Mi).
-- A browser that reaches a node IP: the web UI is a NodePort service.
+- Kubernetes 1.25 or later (1.29 or later for live sync), and `cluster-admin` for the
+  install. It creates a CRD, a ClusterRole and a ClusterRoleBinding.
+- Trident 24 or later, running with an online backend. Trident 26.06 or later is
+  needed to import qtrees in SnapMirror mode.
+- The destination StorageClass or StorageClasses on Trident, created by you. Trident
+  Port only selects them.
+- A StorageClass for the product's own tracking volume (2 GiB). It must have reclaim
+  policy `Retain` and must not be a class you will migrate from. A Trident NAS class
+  is recommended.
+- A Kubernetes Secret holding the ONTAP credentials, and at least one
+  `TridentBackendConfig` in the `Bound` state for the destination class.
+- Room on one node for the product pod, which requests 250m CPU and 512 Mi and is
+  limited to 4 CPU and 2 Gi. During a migration, each volume being copied adds a copy
+  pod that requests 50m and 64 Mi.
+- A browser that can reach a node IP, because the web interface is a NodePort service.
 
-Once, for the offline path:
+For the offline path you also need a private project in your own registry (about
+370 MB), a user that can push to it and pull from it, and a host that reaches both the
+registry and the cluster, with `kubectl`, `skopeo` (or `docker`), `sha256sum`, `curl`
+and `tar`.
 
-- A private project in your registry (about 370 MB) and a user that can push to it and pull from it.
-- A host that reaches the registry and the cluster, with `kubectl`, `skopeo` (or `docker`), `sha256sum`, `curl` and `tar`.
-
-Check the cluster side:
+To check the cluster side before you start:
 
 ```bash
 kubectl version
@@ -237,25 +481,33 @@ Offline:
 2. `load-images.sh` pushes the three images to your registry and checks every digest.
 3. Create the namespace `trident-port-system` and the pull secret.
 4. Apply `install.yaml`, pointed at your registry. This deploys the operator.
-5. Create the product's pull secret and apply the `TridentPort` resource with your tracking class.
+5. Create the product's pull secret and apply the `TridentPort` resource with your
+   tracking class.
 6. Apply the licence.
 7. Check that no pod pulls from outside your registry.
 
-Online: the same without steps 1, 2 and 7. The pull secret holds the `ghcr.io` read token.
+Online is the same without steps 1, 2 and 7. The pull secret holds the `ghcr.io` read
+token.
 
 ### Licence
 
-One licence per cluster, issued for the cluster's serial number, which is the UID of the `kube-system` namespace:
+You need one licence per cluster. It is issued for the cluster's serial number, which
+is the UID of its `kube-system` namespace. You read it with:
 
 ```bash
 kubectl get ns kube-system -o jsonpath='{.metadata.uid}{"\n"}'
 ```
 
-The product installs and runs without a licence. Commands that move data refuse until one is applied (web: Settings, License).
+The licence is issued for that value, so have it ready when you ask for yours. The product
+installs and runs without a licence. Commands that move data refuse until one is
+applied (in the web interface: Settings, License). Read-only planning and the disaster
+recovery commands (`rollback`, `stand-down`) never need one.
 
 ### Upgrade
 
-Step 13 of the guide: load the new images, apply the new `install.yaml` (operator first), then patch the `TridentPort` image tag. Do not upgrade while a cutover is running.
+The upgrade step of the guide: load the new images, apply the new `install.yaml` (the operator
+first), then patch the `TridentPort` image tag. Do not upgrade while a cutover is
+running.
 
 ### Uninstall
 
@@ -264,107 +516,100 @@ kubectl -n trident-port delete tridentport trident-port
 kubectl delete -f install.yaml
 ```
 
-The tracking volume (`trident-port-tracking`) is kept on purpose, so session history and rollback scripts survive a reinstall. Delete it yourself if you no longer need it.
+The tracking volume (`trident-port-tracking`) is kept on purpose, so session history
+and rollback scripts survive a reinstall. Delete it yourself if you no longer need it.
 
 ---
 
-## Image and Permissions
+## Where it runs
 
-The delivered image is compiled. It carries no product source and no shell tooling
-beyond what the product itself runs.
+Trident Port has been run on RKE2, Red Hat OpenShift, k3s and RKE. Live sync needs
+Kubernetes 1.29 or later because it uses native sidecar containers. On every other
+point it follows the requirements above.
 
-**RBAC is namespace-agnostic, and scoped to exactly what each operation needs**
-(a single `ClusterRole`): read access on core objects including `secrets` (get/list/watch, **never write**: this is how the
-product reaches ONTAP credentials without requiring a copy per namespace),
-create/delete on `batch/jobs` and `pods`, patch on
-`deployments`/`statefulsets`/`daemonsets`/`replicasets`, and scoped access on each
-supported operator's own CRD group, never a wildcard over custom resources.
-
-**The copy workload is not a privileged container.** It runs as root
-(`runAsUser: 0`) with `allowPrivilegeEscalation: false` and no additional
-capabilities, sufficient to preserve filesystem ownership and write a raw block
-device. Requesting `privileged` access is unnecessary and is rejected under
-OpenShift's `restricted-v2` policy by design. Exactly one code path requires an additional
-capability: mounting a foreign NFS export, which requires `CAP_SYS_ADMIN`.
-
-**On OpenShift the product binds its own security context constraint** (installed
-by the Helm chart) to the copy service account, in each namespace, before the copy
-pods start, and returns it when the run ends, or keeps it while copy pods are still
-running. Measured on OpenShift for `tp live-sync` (bulk), `tp strimzi-stopped`,
-`tp migrate` and `tp auto`. Nothing has to be granted by hand. Only if the chart's
-SCC is not installed, or the product may not create a RoleBinding in that namespace,
-does the product print the manual command to run (plan B).
-
-**Trident's own controller may be restarted as part of a SnapMirror import**: shared
-CSI infrastructure, restarted by Trident itself, not by this product directly, when
-an import is refused while a volume name is still held in memory. This occurs **at
-most once per run, and only when an import was actually refused**. `--no-trident-restart`
-disables this behavior, stopping the cutover at the first refused import with
-remediation steps provided.
-
-**Interface access is authenticated and scoped to a single deployment.** The default
-Service is `ClusterIP`. The API runs with the deployment's own RBAC, so an
-`X-Trident-Port-Token` header (generated and persisted at install time, validated in
-constant time) is required on every request except health checks, static assets and
-the activation screen.
-
-**Licence entitlement is bound to the target cluster's identity** (its `kube-system`
-namespace UID) and does not transfer if the token is copied to another cluster.
-Completed migrations are recorded in a signed usage ledger (HMAC), protecting the
-integrity of the usage count independent of the cluster operator.
-
-**Every operation is auditable.** `/metrics` exposes Prometheus-format migration
-counts, licence status and audit counters. `tracking/trace.jsonl` is an append-only,
-SIEM-ready record of the CLI and web interface, including every refusal.
+On the image pull: the copy pods run the Trident Port image inside the namespace being
+migrated. The product copies its own pull secret into that namespace for the run and
+removes it afterwards.
 
 ---
 
-## Command Reference
+## The web interface
 
-**Licensing model**: read-only planning (`survey`, `plan`) and critical disaster
-recovery operations (`rollback`, `stand-down`) are permanently unlocked and do not
-require an active licence entitlement. Operations that migrate or mutate data require
-a validated licence.
+|  |  |
+|---|---|
+| ![Dashboard: cluster overview with migration counts, PVC/pod/StorageClass state and Trident backends](docs/img/web-dashboard.png) | ![Cluster Map: every namespace as a node, coloured by migration state](docs/img/web-cluster-map.png) |
+| ![Assessment: which mode each namespace's volumes should take, and why, before anything is installed](docs/img/web-assessment.png) | ![New Migration: the six ways to move data, picked per namespace](docs/img/web-new-migration.png) |
+| ![SnapMirror: ONTAP-to-ONTAP replication, connection profiles and cutover grouping](docs/img/web-snapmirror.png) | ![Migrations: every run this cluster has been through, live or finished](docs/img/web-migrations.png) |
+| ![A migration in progress: phase tracker, pods and PVCs, live log](docs/img/web-migration-detail.png) | ![Migration history: a completed run's phase-by-phase window, byte counts and validation per volume](docs/img/web-reports.png) |
+| ![Cluster Explorer, Operators: every operator controller in the cluster, its CRs and its migration method](docs/img/web-operators.png) | ![Cleanup: released and orphaned volumes left behind by past migrations, reclaim policy called out per row](docs/img/web-cleanup.png) |
 
-**Reading and planning, no licence required**
+The web interface has a page for each step above and for each method. The main pages are these.
+
+| Page | Path | What it is for |
+|---|---|---|
+| Dashboard | `/dashboard` | cluster overview, claim counts, configuration state |
+| Assessment | `/assessment` | pre-flight and the migration plan, on one screen |
+| Cluster Map | `/cluster-map` | every namespace as a node, coloured by state, with operators overlaid |
+| New Migration | `/migrations/new` | the guided wizard |
+| Auto Migration | `/auto-migration` | a whole namespace in one launch |
+| Batch Migration | `/batch-migration` | several namespaces, one after another or in parallel against a live capacity ceiling |
+| Space Race | `/space` | projects whether the source will fill before the baseline completes |
+| Cutover | `/cutover` | the swap, as a separate operation |
+| Snapshot, Live Sync, SnapMirror, Block Cutover | `/snapshot-migration` `/live-sync` `/snapmirror` `/block-cutover` | one page per method |
+| Import NFS | `/import-nfs` | adopt an external export |
+| Sessions | `/sessions` | every run, live or finished |
+| Migrations and Reports | `/history` `/reports` | history, one row per volume |
+| Rollbacks | `/rollbacks` | the way back, per session |
+| Cluster Explorer | `/cluster` | namespaces, pods, claims, volumes, StorageClasses, backends |
+| Cleanup | `/cleanup` | source claims and orphaned Released volumes |
+| Settings | `/settings` | configuration, connection tests, permissions, licence |
+
+---
+
+## Command reference
+
+The `tp` commands run inside the Trident Port pod. From your own machine:
+`kubectl -n trident-port exec -it deploy/trident-port -c trident-port -- tp <command>`
+(use `oc` instead of `kubectl` on OpenShift).
+
+Reading, planning and the disaster-recovery commands are always unlocked. Commands
+that move or change data need a valid licence.
+
+**No licence required**
 
 | Command | What it does |
 |---|---|
-| `tp survey` | assesses whether a cluster is eligible for migration. Read-only, dry-runs a copy pod's admission |
+| `tp survey` | assesses whether a cluster is eligible for migration. Read-only, and it dry-runs a copy pod's admission |
 | `tp plan` | reports what would happen to one namespace's claims, method by method |
-| `tp space` | projects whether the source volume fills before a baseline completes. Sampled over time |
-| `tp validate` | compares source and destination. Performs no writes |
+| `tp space` | projects whether the source volume fills before a baseline completes, sampled over time |
+| `tp validate` | compares source and destination, and writes nothing |
 | `tp sessions` | lists migrations on this installation, or follows one in progress |
-| `tp report` | reports what happened to a namespace's volumes, matching the interface's view |
-| `tp array-leftovers` | lists array volumes no longer referenced by the cluster. Explains, does not delete |
+| `tp report` | reports what happened to a namespace's volumes, matching the web view |
+| `tp array-leftovers` | lists array volumes no longer referenced by the cluster. It explains and does not delete |
 | `tp pre-engagement` | produces the read-mostly assessment kit for a discovery engagement |
-| `tp rollback` | restores reclaim policies, lists or removes leftovers |
+| `tp rollback` | restores reclaim policies, and lists or removes leftovers |
 | `tp start` | restores application availability after a stopped run |
 | `tp support-bundle` | collects a complete diagnostic bundle |
 | `tp stand-down` | scales this deployment to zero if a licence lapses |
 
-**Data operations, licensed**
+**Licensed**
 
 | Command | What it does |
 |---|---|
 | `tp auto` | migrates a whole namespace in one coordinated stop: discover, pre-flight, copy, validate, cut over, verify |
 | `tp migrate` | migrates a single volume |
 | `tp batch` | migrates several namespaces in sequence, each to its own destination |
-| `tp snapshot` | copies from a clone while the application remains online (`bulk`), then cuts over (`cutover`) |
+| `tp snapshot` | copies from a clone while the application stays online (`bulk`), then cuts over (`cutover`) |
 | `tp live-sync` | `start`, `status`, `stop`, `cutover` |
 | `tp snapmirror` | replicates FlexVols between arrays and adopts their contents |
 | `tp import` | brings a foreign NFS export into a Trident claim |
 | `tp cutover` | repoints claims to the new volumes |
 | `tp stop` | stops the workloads holding the claims |
-| `tp block-cutover` | mirrors a Block PVC's device to its destination and switches. `start`/`cutover` also repoint the application's own claim onto it |
-| `tp mixed-cutover` | `start`/`cutover`, the same repoint as `live-sync` and `block-cutover`, coordinated for both mixed in one namespace |
+| `tp block-cutover` | mirrors a Block volume's device to its destination and switches. `start` and `cutover` also repoint the application's own claim onto it |
+| `tp mixed-cutover` | `start` and `cutover` for a namespace that mixes live sync and block volumes |
 | `tp combo-cutover` | one shared cutover window for two or more of snapshot, block mirror and live sync in the same namespace |
 
-### A Namespace, End to End
-
-The `tp` commands below run inside the Trident Port pod. From your machine:
-`kubectl -n trident-port exec -it deploy/trident-port -c trident-port -- tp <command>`
-(`oc` instead of `kubectl` on OpenShift).
+### One namespace, end to end
 
 ```bash
 # Rehearsal: discovery and pre-flight only. Nothing is created, stopped or copied.
@@ -380,20 +625,20 @@ tp auto --namespace shop --dest-sc ontap-nas --sc-map "longhorn=ontap-nas,ceph-r
 tp auto --namespace shop --dest-sc ontap-nas --exclude cache-0 --no-cutover
 ```
 
-**Four parameters govern the cutover window**, each defaulting to full concurrency
-except adoption:
+Four parameters control how much runs at once during the cutover window. Each
+defaults to full concurrency except adoption.
 
 | Flag | Governs | Default |
 |---|---|---|
-| `--copy-parallel` | the copy, a Job, a pod and an image pull per volume | all |
+| `--copy-parallel` | the copy: a Job, a pod and an image pull per volume | all |
 | `--stop-parallel` | stopping workloads, within each ordering tier | all |
-| `--start-parallel` | restoring workloads, already down, so higher concurrency introduces no additional risk | all |
+| `--start-parallel` | restoring workloads, which are already down, so higher concurrency adds no risk | all |
 | `--adopt-parallel` | `tridentctl import` concurrency | **1** |
 
-`--bwlimit` caps the read rate in rsync's own notation (`20M`, `200K`) and is the
-only throttling control.
+`--bwlimit` caps the read rate in rsync's own notation (`20M`, `200K`) and is the only
+throttling control.
 
-### The Other Methods
+### The other methods
 
 ```bash
 # Snapshot: copy from a clone with the application online, then take the delta.
@@ -417,13 +662,14 @@ tp import --namespace shop --server 10.0.0.5 --path /exports/archive \
   --claim archive --dest-sc ontap-nas --size 500Gi
 ```
 
-### Validation and Rollback
+### Validation and rollback
 
 `tp validate` compares counts, sizes and effective modification times by default.
-`--mode full` (or `strict`) reads every byte on both sides. **Raw block volumes are
-always compared across the full device**: a matching prefix is the absence of
-counter-evidence, not confirmation of a match. Excluded by design: a formatted block
-destination's `lost+found`, and Trident's own `.snapshot`/`trident_pvc_*` paths.
+`--mode full` (or `strict`) reads every byte on both sides. Raw block volumes are
+always compared across the full device, because a matching start of the device only
+shows nothing has differed so far and does not confirm a match. A formatted block
+destination's `lost+found` and Trident's own `.snapshot` and `trident_pvc_*` paths
+are left out on purpose.
 
 Every run leaves a session under `tracking/sessions/<id>` with its plan, its
 per-phase log and a rollback script.
@@ -435,162 +681,26 @@ tp rollback --namespace shop                                    # restores recla
 tp rollback --namespace shop --to-source --session sess-8a21 --yes
 ```
 
-**`--to-source` is a reverse migration, not an undo.** It repoints the application to
-its original volume. Data written to the destination since cutover remains there.
-This is stated explicitly before the operation executes.
+`--to-source` is a reverse migration, not an undo. It points the application back at
+its original volume, and data written to the destination since the cutover stays
+there. The product states this before it runs.
 
 ---
 
-## The Web Interface
+## Safeguards
 
-|  |  |
-|---|---|
-| ![Dashboard: cluster overview with migration counts, PVC/pod/StorageClass state and Trident backends](docs/img/web-dashboard.png) | ![Cluster Map: every namespace as a node, coloured by migration state](docs/img/web-cluster-map.png) |
-| ![Assessment: which mode each namespace's volumes should take, and why, before anything is installed](docs/img/web-assessment.png) | ![New Migration: the six ways to move data, picked per namespace](docs/img/web-new-migration.png) |
-| ![SnapMirror: ONTAP-to-ONTAP replication, connection profiles and cutover grouping](docs/img/web-snapmirror.png) | ![Migrations: every run this cluster has been through, live or finished](docs/img/web-migrations.png) |
-| ![A migration in progress: phase tracker, pods and PVCs, live log](docs/img/web-migration-detail.png) | ![Migration history: a completed run's phase-by-phase window, byte counts and validation per volume](docs/img/web-reports.png) |
-| ![Cluster Explorer, Operators: every operator controller in the cluster, its CRs and its migration method](docs/img/web-operators.png) | ![Cleanup: released and orphaned volumes left behind by past migrations, reclaim policy called out per row](docs/img/web-cleanup.png) |
-
-| Page | Path | Purpose |
-|---|---|---|
-| Dashboard | `/dashboard` | cluster overview, claim counts, configuration state |
-| Assessment | `/assessment` | pre-flight and the migration plan, on one screen |
-| Cluster Map | `/cluster-map` | every namespace as a node, coloured by state, with operator overlay |
-| New Migration | `/migrations/new` | the guided migration wizard |
-| Auto Migration | `/auto-migration` | a whole namespace in one launch |
-| Batch Migration | `/batch-migration` | multiple namespaces, sequential or parallel against a live capacity ceiling |
-| Space Race | `/space` | projects whether the source will fill before the baseline completes |
-| Cutover | `/cutover` | the swap, as an isolated operation |
-| Snapshot · Live Sync · SnapMirror · Block Cutover | `/snapshot-migration` `/live-sync` `/snapmirror` `/block-cutover` | one page per method |
-| Import NFS | `/import-nfs` | adopt an external export |
-| Sessions | `/sessions` | every run, live or finished |
-| Migrations · Reports | `/history` `/reports` | migration history, one row per volume |
-| Rollbacks | `/rollbacks` | the undo path, per session |
-| Cluster Explorer | `/cluster` | namespaces, pods, claims, volumes, StorageClasses, backends |
-| Cleanup | `/cleanup` | source claims and orphaned Released volumes |
-| Settings | `/settings` | configuration, connection testing, permissions, licence |
-
----
-
-## Applications With an Operator
-
-A StatefulSet owned by an operator must be stopped **through its Custom Resource**,
-or the operator restores it automatically, measured at under one second. Detection
-is by `ownerReferences` and CR name. The registry covers **44 kinds** (PostgreSQL,
-MongoDB, MySQL/MariaDB, Kafka, Elasticsearch, OpenSearch, Redis, Valkey, Cassandra,
-ScyllaDB, CockroachDB, TiDB, ClickHouse, Couchbase, MinIO, etcd, RabbitMQ,
-Prometheus, Alertmanager, ThanosRuler, KubeVirt virtual machines and others).
-
-```mermaid
-flowchart TD
-    A{Is the workload owned<br/>by a known operator?} -->|yes| B[stop and restore<br/>through its CR]
-    A -->|no| C{Unknown CRD with a<br/>scale subresource?}
-    C -->|yes| D[scale generically,<br/>stated explicitly]
-    C -->|no| E[STOP AND WARN<br/>never a blind scale]
-    B --> F{Does the CRD refuse<br/>replicas: 0?}
-    F -->|13 of the 44 do| G[scale the workload directly<br/>requires --hold-operator]
-    F -->|no| H[patch the CR]
-    style E fill:#ef6c00,color:#fff
-```
-
-**The replica count is read and recorded before any scale-down occurs**, in order: an
-annotation from a prior run, then the CR's own spec, then a default of 1. The
-annotation takes precedence because an interrupted run can leave the spec itself at
-zero, and restoring that value would report success against a namespace that never
-returns to service.
-
-An operator serving *other* namespaces is never suspended without explicit
-authorization: `--hold-operator` is an operator-level acknowledgment that nothing
-reconciles there for the duration of the window.
-
-### The Four Cutover Mechanisms for Operator-Managed Workloads
-
-1. **Native pause, by CR**: a dedicated pause field (`spec.offline`, `spec.stop`).
-2. **Operator hold**: the operator's Deployment to 0, StatefulSet scaled directly.
-3. **Zero, by CR**: patches the CR's own replica field. The operator scales itself down.
-4. **Orphan + PV Retain**: deletes the owner, with the PV already set to `Retain`.
-   Available today for KubeVirt.
-
-### Elasticsearch (ECK) and Kafka (Strimzi): Native Routes
-
-ECK refuses a change of storage class on a running claim, and Strimzi keeps applying
-the pool's old class to its claims after a swap. For both, the volume swap is not
-used. Each has its own route, online for Elasticsearch and Kafka brokers.
-
-| Workload | Command | Route | Measured |
-|---|---|---|---|
-| Elasticsearch (ECK) | `tp eck-nodeset` | new node sets on the destination class, old ones retired once the cluster is ready. Old volumes set to `Retain` first | Elasticsearch Ready after the move, no outage |
-| Kafka brokers (Strimzi) | `tp strimzi-pool` | a new `KafkaNodePool` on the destination class. Partitions move by Cruise Control or by Kafka's own reassignment, then the old pool is removed | Kafka Ready |
-| Kafka controllers (Strimzi) | `tp strimzi-stopped` | Kafka paused, same nodes copied to the destination class and swapped, then resumed | Kafka Ready, stopped or with `--live-sync` |
-
-In a namespace that also holds other claims, these claims take their route and the
-rest follow the chosen mode in the same run. Each command has `plan` and `status`.
-
-### Validated Compatibility, by Operator Kind
-
-Every migration path is measured end to end against a real cluster before it is
-published as supported. `✅` denotes a validated, production-ready path. `Native route · measured` marks a kind moved by
-its own route (see [Native Routes](#elasticsearch-eck-and-kafka-strimzi-native-routes)),
-measured on a real cluster. `excluded` marks a deliberate scope decision.
-
-Each entry lists the mechanism applied (1–4 above, or `generic` for kinds without a
-dedicated CRD path) alongside its validation status.
-
-| Kind | Mechanism · Status | Kind | Mechanism · Status |
-|---|---|---|---|
-| `Artifactory` | generic · ✅ | `CephCluster` (Rook) | excluded |
-| `CouchDB` | generic · ✅ | `CrdbCluster` (CockroachDB) | 2 · ✅ |
-| `Dragonfly` | 3 · ✅ | `Elasticsearch` | Native route · measured |
-| `Gitea` | generic · ✅ | `Harbor` | generic · ✅ |
-| `KafkaNodePool` | Native route · measured | `MariaDB` | 3 · ✅ |
-| `Milvus` | 3 · ✅ | `MySQLCluster` (MOCO) | 1 · ✅ |
-| `MysqlCluster` (Presslabs) | 3 · ✅ | `NATS` | generic · ✅ |
-| `Neo4j` | generic · ✅ | `PerconaServerMongoDB` | 3 · ✅ |
-| `PerconaXtraDBCluster` | 3 · ✅ | `RabbitmqCluster` | 3 · ✅ |
-| `Seaweed` | 2 · ✅ | `TemporalCluster` | 2 · ✅ |
-| `Vault` | excluded | `VirtualMachine` (KubeVirt) | 4 · ✅ |
-| `VMCluster` | 1 · ✅ | `postgresql` (Zalando) | 3 · ✅ |
-
-**22 validated paths: 20 production-ready, plus 2 native routes**, each measured clean end to end against a
-real cluster.
-
-The other kinds of the registry are not in this table because none of them has been run end to end on a cluster. That includes `CassandraDatacenter`, whose stop changed after its earlier run and has not been measured since, `ThanosRuler`, `ClickHouseKeeperInstallation`, `OpenshiftArtifactoryHa`, `Keycloak`, `NexusRepo`, `Hazelcast` and `ActiveMQArtemis`. A kind that is not here is not claimed as validated.
-
-`VirtualMachine`'s disk migrates through its own dedicated DataVolume swap
-(`tp compat kv-dv-swap.sh swap <ns> <vm> <datavolume> <target-pv> <target-sc>`),
-mechanism 4's shape rather than a CR patch, validated end to end, including data
-integrity inside the guest. `MySQLCluster` (MOCO) is the validated case of mechanism 1
-working exactly as designed: a dedicated `spec.offline` field, not a replica count.
-`Gitea`, `CouchDB`, `Neo4j`, `NATS`, `Harbor` and `Artifactory` are validated through
-the generic unknown-operator path (direct, stated scaling). `CephCluster` (Rook) is excluded by design: storage infrastructure, like
-Trident itself, is not a migration target for this product. `Vault` is excluded by
-design as well: migrating its Raft store underneath it is a correctness risk outside
-the product's scope, validated against real hardware, the storage transfer itself
-completes cleanly, but Vault's own seal state requires its native unseal procedure
-regardless, so a clean storage copy alone does not constitute a working handoff.
-`Milvus` (mechanism 3 entry) follows the same pattern as `TemporalCluster`: its own CR
-patch is not exercised in practice because state resides in dependent services (etcd,
-MinIO) rather than the patched component, the namespace migration itself, through
-those dependencies' volumes, completes cleanly end to end.
-
----
-
-## Operational Safeguards
-
-- **Infrastructure namespaces** are protected by default. `--i-know-this-is-infrastructure`
-  is required to proceed, stopping workloads in a namespace running storage
-  infrastructure removes volumes rather than quiescing them.
-- **A namespace under active GitOps reconciliation (Argo CD or Flux)** is detected.
-  An Argo CD Application with automated sync is suspended by the run itself (its
-  sync policy is saved in the session) and handed back with `tp gitops resume`. See
-  [Argo CD and GitOps](#argo-cd-and-gitops). When it cannot be suspended, Flux, an
-  Application without automated sync, or one that cannot be read, the operation is
+- **Infrastructure namespaces are protected.** Stopping workloads in a namespace that
+  runs storage infrastructure removes volumes instead of quieting them, so
+  `--i-know-this-is-infrastructure` is required to proceed.
+- **GitOps is detected.** An Argo CD Application with automated sync is suspended by
+  the run and handed back with `tp gitops resume`. When it cannot be suspended (Flux,
+  an Application without automated sync, or one that cannot be read) the operation is
   declined, naming the owning resource and the exact suspend command.
-  `--allow-gitops` proceeds without suspending anything: the controller can then
+  `--allow-gitops` goes ahead without suspending anything, and then the controller can
   recreate a claim on the source class while it is being swapped.
-- **A second run against a namespace already in flight is refused, not queued.**
-  `tp auto`, `tp batch`, `tp snapmirror` and `tp live-sync` all route through a single
-  session guard:
+- **One run per namespace.** A second run against a namespace already in flight is
+  refused and not queued. `tp auto`, `tp batch`, `tp snapmirror` and `tp live-sync`
+  all go through the same guard:
 
   ```
   [ERROR] a migration of 'shop' is already running: shop-20260911-101500
@@ -598,152 +708,90 @@ those dependencies' volumes, completes cleanly end to end.
     read volumes the first run is actively restoring.
   ```
 
-- **A dry run creates, stops or copies nothing**: enforced at the engine level.
-- **A long-running copy is never silent.** Progress is reported on a fixed interval,
-  with elapsed time and the exact command to follow the live log.
+- **A dry run changes nothing.** This is enforced inside the engine, and any change of
+  state during a rehearsal is treated as a defect.
+- **A long copy is never silent.** Progress is reported at a fixed interval, with
+  elapsed time and the exact command to follow the live log. rsync cannot give a
+  reliable estimate, so you get intervals instead of a percentage.
+- **Trident's controller may restart once during a SnapMirror import.** When an import
+  is refused because a volume name is still held in memory, Trident restarts its own
+  controller. This happens at most once per run, and only after a refused import.
+  `--no-trident-restart` turns it off and stops the cutover at the first refused
+  import, with remediation steps.
 
 ---
 
-## Argo CD and GitOps
+## Security and permissions
 
-When a namespace is managed by Argo CD, `tp auto`, `tp combo-cutover` and `tp live-sync`
-suspend its Application (when it has automated sync), move the claims and print a
-session id. Git still names the old StorageClass until
-it is changed.
-
-1. Run the migration. The Application is suspended by the run itself.
-2. `tp gitops status --session <id>` lists what is left to change in Git.
-3. `tp gitops bundle --session <id> --out <dir>` writes the change and an `apply.py`
-   that you run inside your own clone of the repository, with your own credentials.
-   commit, push and merge it as usual. This is the path for private repositories.
-   For a repository readable without a credential, `tp gitops apply --session <id> >
-   change.patch` produces the same change as a patch for `git am`.
-   - **What it changes:** only the line that holds the old StorageClass, with real
-     paths. It edits a Helm `values.yaml` key, a Kustomize file or a plain YAML
-     manifest, and only when exactly one place matches.
-   - **When it cannot:** an Application with several sources or a config-management
-     plugin, a layout it does not recognise, or several values that match. That
-     change is listed as `unknown` and nothing is edited. Make it by hand.
-4. `tp gitops sync --session <id>` prints the Argo CD sync command. Add `--yes` to run it.
-5. `tp gitops resume --session <id> --yes` gives the Application back its automated
-   sync policy.
-
-For a StatefulSet, `tp gitops sts-vct --session <id> --yes` recreates it with its
-`volumeClaimTemplates` on the new class (pods and claims stay). Argo CD recreated it
-from Git, Synced and Healthy.
-
-For several namespaces at once, `--namespaces a b c` replaces `--session`, and
-`tp gitops bundle --all --out <dir>` writes one change per repository for every
-suspended session. An Application generated by an ApplicationSet is named with its
-ApplicationSet: the change goes in the ApplicationSet's own source. The same steps are
-in the web interface under the migration's **Git change** tab and in **Bulk**.
-
-Trident Port never writes to your repository. You run `apply.py` in your clone and push
-with your own credential. The Application stays suspended until you resume it.
-
-Measured against a real Argo CD on OpenShift (13 and 14 Oct 2026) and on vSphere CSI
-with k3s (29 Oct 2026): status, change package, merge, StatefulSet recreation, sync and
-resume. On 29 Oct this included an ApplicationSet child with 10 StatefulSets: the pods
-were not restarted.
+- **The image is compiled.** It carries no product source and no shell tooling beyond
+  what the product itself runs.
+- **Permissions are narrow.** One `ClusterRole` gives read access to core objects
+  including `secrets` (get, list and watch, never write, which is how the product
+  reaches the ONTAP credentials without a copy in every namespace), create and delete
+  on `batch/jobs` and `pods`, patch on `deployments`, `statefulsets`, `daemonsets` and
+  `replicasets`, and scoped access to each supported operator's own resource group.
+  There is no wildcard over custom resources.
+- **The copy pod is not privileged.** It runs as root with
+  `allowPrivilegeEscalation: false` and no added capabilities, which is enough to keep
+  file ownership and to write a raw block device. It is not asked to be `privileged`,
+  which OpenShift's `restricted-v2` policy rejects by design. Exactly one path needs an
+  extra capability: mounting a foreign NFS export, which needs `CAP_SYS_ADMIN`. In a
+  namespace that enforces `PodSecurity: restricted`, the copy pods run without root,
+  with the namespace's own user and group.
+- **On OpenShift nothing is granted by hand.** The product binds its own security
+  context constraint to the copy service account before the copy pods start, and
+  returns it when the run ends, or keeps it while copy pods are still running. This
+  was measured on OpenShift for `tp live-sync` (bulk), `tp strimzi-stopped`,
+  `tp migrate` and `tp auto`. If the chart's constraint is not installed, or the
+  product may not create a RoleBinding in that namespace, it prints the exact command
+  for you to run.
+- **The interface is authenticated.** The default Service is `ClusterIP`. Every
+  request except health checks, static assets and the activation screen must carry an
+  `X-Trident-Port-Token` header, which is generated at install time and checked in
+  constant time.
+- **The licence is bound to one cluster.** It is tied to the UID of the cluster's
+  `kube-system` namespace, so a copied token does not work elsewhere.
+- **Everything is auditable.** `/metrics` exposes migration counts, licence status and
+  audit counters in Prometheus format. `tracking/trace.jsonl` is an append-only record
+  of the command line and the web interface, including every refusal, in a form that
+  can be loaded into a SIEM. Each session folder also keeps its plan and per-phase
+  logs, and `tp support-bundle` gathers them.
 
 ---
 
-## What Survives a Cutover
+## Before a migration window
 
-**Label and annotation retention follows a deny-list, not an allow-list.**
-Every label on the source claim carries to the replacement
-unfiltered, there is no maintained list of "supported" annotations to extend as
-tooling evolves. `backup.velero.io/backup-volumes`, `argocd.argoproj.io/tracking-id`,
-`cdi.kubevirt.io/storage.populatedFor`, cost-centre labels: all are preserved.
+Confirm these ahead of time, so they are not discovered during the window.
 
-**Three annotation families are dropped, each for a stated reason**: properties true
-of the binding being replaced, and false of its replacement:
+- **Permissions.** The chart installs the RBAC. On OpenShift nothing else is needed.
+- **A `VolumeSnapshotClass`** registered for the source provisioner, if you intend to
+  use the snapshot method. Without it the planner excludes that method.
+- **The destination `TridentBackendConfig` in `Bound` state.**
+- **ONTAP credentials** in a Kubernetes Secret the product can read.
+- **A pull secret.** The product handles this itself, as described above.
 
-| Dropped | Rationale |
-|---|---|
-| `pv.kubernetes.io/*`, `volume.kubernetes.io/*`, `volume.beta.kubernetes.io/*` | written by the binding machinery. The API server writes its own on the new claim |
-| `trident.netapp.io/*` | Trident's record of a prior SnapMirror import, true of the volume just imported onto, false of the one it is migrating to |
-| `kubectl.kubernetes.io/last-applied-configuration` | describes the object as declared before the migration. A later `kubectl apply` would diff against a spec that no longer exists |
+How long the window lasts depends on the method. Offline copy puts the whole transfer
+inside it, so it grows with the size of the data. Snapshot and live sync take the bulk
+transfer out and leave the final delta. SnapMirror cuts by FlexVol, not by claim. The
+pre-flight and the plan estimate the window for each namespace from this cluster's own
+measurements, and the speed analysis (Settings, or `tp speed-analyze`) measures your
+storage. For sizing against a specific data set, ask your Trident Port contact for an
+assessment.
 
-Every deliberately dropped annotation is named in the migration report, distinguishing
-an intentional design decision from data loss.
-
----
-
-## Observability
-
-- **`/metrics`**: Prometheus text exposition: migration counts by status, licence
-  validity, tier and limit, verified ledger entries, audit counters.
-- **`tracking/trace.jsonl`**: append-only JSON lines, a unified record for the CLI
-  and the web interface, including every refusal. Suitable for SIEM ingestion.
-- **`tracking/sessions/<id>/`**: the plan, per-phase logs and trace for every run.
-  the basis of a support bundle.
-
----
-
-## Troubleshooting and Expected Results
-
-| Situation | Observed Behavior | Resolution |
-|---|---|---|
-| A second run against a namespace already migrating | Refused: a migration of that namespace is already in progress | By design, concurrent runs on one namespace would overwrite each other's copy in progress. Wait for completion, or follow the active session |
-| `tp auto` against an infrastructure namespace | Declined by default, requiring `--i-know-this-is-infrastructure` | Stopping workloads where storage itself runs can remove volumes rather than quiesce them. Requires explicit acknowledgment |
-| A namespace under active Argo CD/Flux reconciliation | An Argo CD Application with automated sync is suspended by the run. Flux, an Application without automated sync, or one that cannot be read is declined, naming the owning resource and the exact suspend command | Suspend it as printed, or use `--allow-gitops` to proceed without suspending (the controller can recreate a claim on the source class during the swap) |
-| `--dry-run` performs no changes | Enforced at the engine level | Any state change during a rehearsal is treated as a defect |
-| A long-running copy shows no progress percentage | A status line is emitted on a fixed interval, with elapsed time and the exact command to follow the live log | rsync-based transfers cannot produce a reliable ETA. Progress is reported by interval instead |
-
-**A successful migration** is confirmed when `tp validate` agrees with the
-byte-level checksum comparison, the migration report shows all cutover phases
-with measured durations, and a complete session record exists under
-`tracking/sessions/<id>/`, including its plan, per-phase log and rollback script.
+A migration counts as successful when `tp validate` agrees with a byte-level
+comparison, the report shows every cutover phase with a measured duration, and a
+complete session record exists under `tracking/sessions/<id>/`.
 
 ---
 
 ## Support
 
-- **`tp support-bundle`** produces a complete diagnostic archive (logs, trace,
-  session state) for submission to support.
-- Before contacting support, capture the active session (`tp sessions --session
-  <id> --follow`) and the exact error text.
-- Contact your Trident Port contact or supporting partner for engagement-specific
-  support channels.
-
----
-
-## Prerequisites and Best Practices
-
-Beyond the environment requirements above, the following should be confirmed
-ahead of a migration window rather than discovered during one:
-
-- **RBAC**: installed by the chart. On OpenShift nothing else is needed: the product
-  binds its own SCC (never `privileged`, which `restricted-v2` rejects by design).
-  Plan B, only if the product prints that it could not bind it: run the command it
-  prints. In a namespace that enforces `PodSecurity: restricted`, the copy pods run
-  without root, with the namespace's own uid and group.
-- **A `VolumeSnapshotClass` registered with a driver matching the source
-  provisioner**, when the snapshot method is intended, the planning engine will
-  otherwise exclude it, but resolving this ahead of time avoids a mid-window
-  surprise.
-- **The destination `TridentBackendConfig` already in `Bound` state** before a
-  run begins.
-- **ONTAP credentials provisioned as a reachable Kubernetes Secret.**
-- **Pull secret.** The copy pods run the Trident Port image in the namespace being
-  migrated. The product copies its own pull secret into that namespace for the run and
-  removes it afterwards.
-
----
-
-## Performance and Sizing
-
-- **Offline copy places the entire transfer inside the cutover window**: window
-  duration scales with dataset size.
-- **Snapshot and live sync remove the bulk transfer from the cutover window**: the
-  window is dominated by the final delta.
-- **SnapMirror cuts by FlexVol, not by individual claim**: on economy storage classes,
-  namespaces sharing a FlexVol are cut together (see [The Methods](#the-methods)).
-
-The pre-flight and the plan estimate the window for each namespace from this cluster's
-own measurements. For sizing against a specific dataset, ask your Trident Port contact
-for an assessment.
+- `tp support-bundle` produces a diagnostic archive with logs, trace and session
+  state to send to support.
+- Before you contact support, capture the active session
+  (`tp sessions --session <id> --follow`) and the exact error text.
+- Contact your Trident Port contact or supporting partner for the support channel of
+  your engagement.
 
 ---
 
