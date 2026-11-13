@@ -1,3 +1,4 @@
+
 # Trident Port
 
 > **Sailing to a Safe Harbor.** Move Kubernetes persistent volumes from any storage
@@ -63,7 +64,7 @@ unavailable because the source CSI driver does not register a VolumeSnapshotClas
 **Design considerations:**
 
 - **SnapMirror addresses the economy storage class** (`ontap-nas-economy`,
-  `ontap-san-economy`). Requires Trident **26.06+** (Tech Preview); pre-flight
+  `ontap-san-economy`). Requires Trident **26.06+** (Tech Preview). Pre-flight
   validates the version rather than failing at cutover.
 - **SnapMirror operates at the FlexVol level, not the individual claim.** On
   `ontap-*-economy`, several namespaces may share a single FlexVol, and the array
@@ -82,7 +83,7 @@ unavailable because the source CSI driver does not register a VolumeSnapshotClas
   build"* is distinct from *"the target cluster cannot support this."* Offline copy
   is always available.
 - **Block cutover is never selected automatically**: the only method above that the
-  planning engine skips; an operator names it directly. `tp mixed-cutover` coordinates
+  planning engine skips. An operator names it directly. `tp mixed-cutover` coordinates
   it with Live Sync when both are needed in the same namespace.
 
 ---
@@ -114,7 +115,7 @@ asserting an estimate.
 
 **Source volumes are never deleted.** They are set to `Retain` before anything else
 happens, so they persist beyond their claims. Leftover volumes are surfaced for
-reclamation; nothing is removed without an explicit operator action.
+reclamation. Nothing is removed without an explicit operator action.
 
 ---
 
@@ -133,7 +134,7 @@ Trident Port is validated against the following platforms:
 | NetApp Trident | 24+ · **26.06+** for qtree import in SnapMirror mode |
 | Trident backend | at least one `TridentBackendConfig` bound, provisioning into the destination StorageClass |
 | Credentials | a Kubernetes Secret holding the ONTAP credentials |
-| Registry | offline: your own registry; online: `ghcr.io` with a read token. The product copies its pull secret into each namespace it migrates, for the run only |
+| Registry | offline: your own registry. Online: `ghcr.io` with a read token. The product copies its pull secret into each namespace it migrates, for the run only |
 | Licence | a token bound to the cluster's `kube-system` namespace UID |
 
 ---
@@ -143,31 +144,47 @@ Trident Port is validated against the following platforms:
 Everything listed here ran against a real cluster and a real ONTAP, with the result
 checked afterwards. Dates are 2026. Rows from October ran on lab builds made during
 the 1.2.x work. Not measured:
-KubeVirt, Flux (not supported; Argo CD is) and the rollback of the Elasticsearch
-and Strimzi native routes.
+Flux (not supported, Argo CD is) and the rollback of the Elasticsearch
+and Strimzi native routes. Changes made after 1.2.12 are in the next release. Only those listed in the last rows of this table were run on a cluster.
 
 | Area | Where | Result |
 |---|---|---|
-| Install through the operator | RKE2 v1.32, built from scratch with the operator (14 Oct) | Web interface and API answer; a read-only bulk plan (`tp live-sync start --namespaces`) runs and changes nothing. The operator install is also validated on k3s |
-| Live sync, many namespaces | OpenShift (13 Oct) | `2 of 2 namespace(s) syncing with the applications running`; cutover of 3 claims, a file modified after the sync identical on both sides |
+| Install through the operator | RKE2 v1.32, built from scratch with the operator (14 Oct) | Web interface and API answer. A read-only bulk plan (`tp live-sync start --namespaces`) runs and changes nothing. The operator install is also validated on k3s |
+| Live sync, many namespaces | OpenShift (13 Oct) | `2 of 2 namespace(s) syncing with the applications running`. Cutover of 3 claims, a file modified after the sync identical on both sides |
 | Live sync, window of 10 namespaces | OpenShift (9 Oct) | 10 of 10 namespaces migrated |
-| vSphere CSI source to ONTAP NAS | k3s (14 Oct) | Live-sync cutover: stop, final delta, swap and restart; application serving after the cut |
-| Argo CD (real instance) | OpenShift (13 and 14 Oct) | Application suspended during the migration; Git change delivered as a patch; sync policy restored by `tp gitops resume`; StatefulSet recreated with its claim template on the new class |
-| Elasticsearch on ECK | OpenShift (13 Oct) | Moved through new node sets with no outage; Elasticsearch Ready |
-| Kafka on Strimzi | OpenShift (13 Oct) | Broker pool moved through a new pool, Kafka Ready; controller pool moved with Kafka stopped, or with live sync, Kafka Ready |
+| vSphere CSI source to ONTAP NAS | k3s (14 Oct) | Live-sync cutover: stop, final delta, swap and restart. Application serving after the cut |
+| Argo CD (real instance) | OpenShift (13 and 14 Oct) | Application suspended during the migration. Git change delivered as a patch. Sync policy restored by `tp gitops resume`. StatefulSet recreated with its claim template on the new class |
+| Elasticsearch on ECK | OpenShift (13 Oct) | Moved through new node sets with no outage. Elasticsearch Ready |
+| Kafka on Strimzi | OpenShift (13 Oct) | Broker pool moved through a new pool, Kafka Ready. Controller pool moved with Kafka stopped, or with live sync, Kafka Ready |
 | OpenShift security context constraint | OpenShift (13 and 14 Oct) | The product binds its own SCC for the copy pods and returns it when the run ends |
-| Live sync of several namespaces with the cutover in windows | RKE with a virtual ONTAP (18 Oct) | 3 namespaces with the applications running, cut over in 2 windows, one namespace rolled back. sha256, owner and mode identical in 203 of 203 entries per namespace; the applications serve after the cut and after the rollback |
-| Copy pods on a node with SELinux Enforcing | RKE on RHEL 9.6 (18 Oct) | Bulk live sync in a `restricted` namespace reached READY with 100 % copied and no `Permission denied`; the previous build failed with `Permission denied` |
-| Namespaces with 63-character names | RKE with a virtual ONTAP (19 Oct) | Live-sync cutover with identical sha256 and modes, rollback with identical data; 0 illegal label values out of 16 checked |
-| Snapshot plus live sync (combo) | RKE with a virtual ONTAP (18 Oct) | `baseline`, `restricted` and `privileged` namespaces pass; the report reads `2 of 2`; rollback, modes and sha256 identical. |
+| Live sync of several namespaces with the cutover in windows | RKE with a virtual ONTAP (18 Oct) | 3 namespaces with the applications running, cut over in 2 windows, one namespace rolled back. sha256, owner and mode identical in 203 of 203 entries per namespace. The applications serve after the cut and after the rollback |
+| Copy pods on a node with SELinux Enforcing | RKE on RHEL 9.6 (18 Oct) | Bulk live sync in a `restricted` namespace reached READY with 100 % copied and no `Permission denied`. The previous build failed with `Permission denied` |
+| Namespaces with 63-character names | RKE with a virtual ONTAP (19 Oct) | Live-sync cutover with identical sha256 and modes, rollback with identical data. 0 illegal label values out of 16 checked |
+| Snapshot plus live sync (combo) | RKE with a virtual ONTAP (18 Oct) | `baseline`, `restricted` and `privileged` namespaces pass. The report reads `2 of 2`. Rollback, modes and sha256 identical. |
 | Block cutover (SAN) | RKE with a virtual ONTAP (18 Oct) | Longhorn to a SAN class from the command line: start, status, cutover and rollback, md5 of 32 MiB identical |
-| Argo CD app-of-apps | RKE (18 Oct) | `tp gitops resume --yes` restores child and parent; a second `resume` ends rc 0 with `Nothing to resume`. A rollback of an application with `selfHeal` is refused (rc 3) before anything is stopped; with `--allow-gitops` it suspends and reverts |
-| Rollback and session handling | RKE (18 Oct) | `tp rollback --to-source` acts on the session that holds the destination with 3 `ROLLED_BACK` and 1 `COMPLETED` sessions; a recreated namespace starts a new session; source and destination on the same backend are refused |
-| Previous modes | RKE with a virtual ONTAP (18 Oct) | Copy rc 0 with md5 intact; live-sync start and cutover pass |
+| Argo CD app-of-apps | RKE (18 Oct) | `tp gitops resume --yes` restores child and parent. A second `resume` ends rc 0 with `Nothing to resume`. A rollback of an application with `selfHeal` is refused (rc 3) before anything is stopped. With `--allow-gitops` it suspends and reverts |
+| Rollback and session handling | RKE (18 Oct) | `tp rollback --to-source` acts on the session that holds the destination with 3 `ROLLED_BACK` and 1 `COMPLETED` sessions. A recreated namespace starts a new session. Source and destination on the same backend are refused |
+| Previous modes | RKE with a virtual ONTAP (18 Oct) | Copy rc 0 with md5 intact. Live-sync start and cutover pass |
 | Uninstall | RKE (18 Oct) | No cutover Lease left after `helm uninstall` |
 | Extended attributes | OpenShift (13 and 14 Oct) | With `--copy-xattrs`, a `user.*` attribute set on the source is read on the new volume (`tp live-sync`, `tp migrate`, `tp auto`) |
-| vSphere CSI to ONTAP NAS, bulk live sync | k3s with vSphere CSI (28 and 29 Oct) | Bulk start over 14 namespaces with the applications running (Argo CD, RabbitMQ, Keycloak, 10 StatefulSets); 9 namespaces cut over in one bulk cutover, labels and annotations unchanged |
-| Argo CD after the cutover | k3s with vSphere CSI (29 Oct) | Git change from the package, StatefulSet recreated by Argo CD, sync and resume; same pods, same volumes. Also an ApplicationSet child with 10 StatefulSets |
+| ApplicationSet children held and released | RKE2 (15 and 16 Oct) | Children held, cutover done, the Git change edits only `storageClassName`, `tp gitops resume --yes` restores automated, selfHeal and prune, the ApplicationSet spec and its md5 identical |
+| Argo Workflows | RKE2 (15 and 16 Oct) | Cutover rc 0 in 55 s, 3 completed Workflow pods deleted before the swap, CronWorkflow restored, md5 identical. A half-swap rollback rc 0 with no write to the Workflow |
+| A foreign volume is never adopted | RKE2 (15 and 16 Oct) | An `Available` volume that belongs to someone else was refused and nothing was copied |
+| `lost+found` in a non-root copy | vSphere (15 and 16 Oct) | Restricted namespace, cutover 1m37s against about 1m40s estimated, md5 identical |
+| First copy in batches | RKE (15 and 16 Oct) | 46 GiB in 19 files at 60 MiB/s with percent and ETA following the bar, cutover 50 s. 150,001 small files (2.6 GB) first copy 12m24s, cutover 67 s |
+| Copy pod size | vSphere (15 and 16 Oct) | 4 GiB at about 112 MiB/s with 2 CPU against about 56 MiB/s at 500m, no throttling |
+| Rollback keeps the claim metadata | vSphere and RKE (15 and 16 Oct) | `last-applied` identical in both directions, provisioner annotations present, copier stopped first, nothing left `Terminating` |
+| API token and webhook certificate | RKE2 (15 and 16 Oct) | One upgraded release, no errors, token read from the Secret only (200 with it, 401 without) |
+| Speed analysis | Lab cluster, 1.2.212 | Run from the command line and from the web, one saved result for both. Against about 20 StorageClasses the run after install stops at 10 minutes and leaves most of them not measured |
+| Window estimate as a ceiling | RKE2, 1.2.215 | The announced figure covered the real stop in 4 of 4 measurements, cutover and rollback |
+| StatefulSet that deletes its own claims | RKE2, 1.2.215 | Official Loki chart with `Delete` on both retention fields: the policy went to `Retain` before the scale to zero, the claim stayed, the migration ended rc 0, the policy went back to `Delete`, 2000 lines kept the same sha256, and the rollback ran the same cycle |
+| Exit 9, done but not ready yet | OpenShift 1.2.212, RKE2 1.2.212 to 1.2.214 | `tp auto --resume`, `tp live-sync cutover`, `tp combo-cutover`, `tp mixed-cutover cutover`, `tp snapmirror --resume` and the web Continue button ended with exit 9 and the session `COMPLETED_NOT_READY` when the application was only slow. `tp block-cutover` was not run |
+| Rollback of a mixed session | RKE2, 1.2.214 | A Strimzi pool and a normal application in one namespace: one `tp rollback --to-source` returned both claims, and 5000 messages and the application sha256 were identical |
+| Run that finds nothing to migrate over a stopped application | RKE2 and OpenShift, 1.2.214 | It names the workloads and `tp start -n`, and exits 1 |
+| ThanosRuler of OpenShift user workload monitoring | OpenShift 1.2.210 | Stopped through the Cluster Monitoring Operator, cut in 2m35s, StatefulSet recreated 2 of 2 on NFS, rules and alert kept. The cut was not repeated |
+| API documentation page | OpenShift, in a browser, 1.2.215 | `/docs` loads Swagger with Authorize and the list of endpoints |
+| vSphere CSI to ONTAP NAS, bulk live sync | k3s with vSphere CSI (28 and 29 Oct) | Bulk start over 14 namespaces with the applications running (Argo CD, RabbitMQ, Keycloak, 10 StatefulSets). 9 namespaces cut over in one bulk cutover, labels and annotations unchanged |
+| Argo CD after the cutover | k3s with vSphere CSI (29 Oct) | Git change from the package, StatefulSet recreated by Argo CD, sync and resume. Same pods, same volumes. Also an ApplicationSet child with 10 StatefulSets |
 | Restricted namespace (OpenShift) | OpenShift 4.21 (28 Oct) | Copy and batch by command line pass in a `restricted` namespace: copy pods without root, destination writable by the application's group |
 
 ---
@@ -186,7 +203,7 @@ The step-by-step guides ship inside those files and are also here:
 [`docs/INSTALL-OPERATOR-ONLINE.md`](docs/INSTALL-OPERATOR-ONLINE.md). Every block in
 them can be pasted as it is. You edit your own values once, at the start.
 
-Current release: **v1.2.4**.
+Current release: **v1.2.12**.
 
 ### Before you start
 
@@ -281,12 +298,12 @@ does the product print the manual command to run (plan B).
 **Trident's own controller may be restarted as part of a SnapMirror import**: shared
 CSI infrastructure, restarted by Trident itself, not by this product directly, when
 an import is refused while a volume name is still held in memory. This occurs **at
-most once per run, and only when an import was actually refused**; `--no-trident-restart`
+most once per run, and only when an import was actually refused**. `--no-trident-restart`
 disables this behavior, stopping the cutover at the first refused import with
 remediation steps provided.
 
 **Interface access is authenticated and scoped to a single deployment.** The default
-Service is `ClusterIP`; the API runs with the deployment's own RBAC, so an
+Service is `ClusterIP`. The API runs with the deployment's own RBAC, so an
 `X-Trident-Port-Token` header (generated and persisted at install time, validated in
 constant time) is required on every request except health checks, static assets and
 the activation screen.
@@ -297,7 +314,7 @@ Completed migrations are recorded in a signed usage ledger (HMAC), protecting th
 integrity of the usage count independent of the cluster operator.
 
 **Every operation is auditable.** `/metrics` exposes Prometheus-format migration
-counts, licence status and audit counters; `tracking/trace.jsonl` is an append-only,
+counts, licence status and audit counters. `tracking/trace.jsonl` is an append-only,
 SIEM-ready record of the CLI and web interface, including every refusal.
 
 ---
@@ -313,13 +330,13 @@ a validated licence.
 
 | Command | What it does |
 |---|---|
-| `tp survey` | assesses whether a cluster is eligible for migration; read-only, dry-runs a copy pod's admission |
+| `tp survey` | assesses whether a cluster is eligible for migration. Read-only, dry-runs a copy pod's admission |
 | `tp plan` | reports what would happen to one namespace's claims, method by method |
-| `tp space` | projects whether the source volume fills before a baseline completes; sampled over time |
-| `tp validate` | compares source and destination; performs no writes |
+| `tp space` | projects whether the source volume fills before a baseline completes. Sampled over time |
+| `tp validate` | compares source and destination. Performs no writes |
 | `tp sessions` | lists migrations on this installation, or follows one in progress |
 | `tp report` | reports what happened to a namespace's volumes, matching the interface's view |
-| `tp array-leftovers` | lists array volumes no longer referenced by the cluster; explains, does not delete |
+| `tp array-leftovers` | lists array volumes no longer referenced by the cluster. Explains, does not delete |
 | `tp pre-engagement` | produces the read-mostly assessment kit for a discovery engagement |
 | `tp rollback` | restores reclaim policies, lists or removes leftovers |
 | `tp start` | restores application availability after a stopped run |
@@ -339,7 +356,7 @@ a validated licence.
 | `tp import` | brings a foreign NFS export into a Trident claim |
 | `tp cutover` | repoints claims to the new volumes |
 | `tp stop` | stops the workloads holding the claims |
-| `tp block-cutover` | mirrors a Block PVC's device to its destination and switches; `start`/`cutover` also repoint the application's own claim onto it |
+| `tp block-cutover` | mirrors a Block PVC's device to its destination and switches. `start`/`cutover` also repoint the application's own claim onto it |
 | `tp mixed-cutover` | `start`/`cutover`, the same repoint as `live-sync` and `block-cutover`, coordinated for both mixed in one namespace |
 | `tp combo-cutover` | one shared cutover window for two or more of snapshot, block mirror and live sync in the same namespace |
 
@@ -383,11 +400,11 @@ only throttling control.
 tp snapshot bulk    --namespace shop --pvc data-0 data-1 --dest-sc ontap-nas
 tp snapshot cutover --namespace shop --pvc data-0 data-1
 
-# Live sync: a sidecar keeps the destination current; the cut is the final delta.
+# Live sync: a sidecar keeps the destination current. The cut is the final delta.
 tp live-sync start   --namespace shop --pvc data-0 --dest-sc ontap-nas
 tp live-sync cutover --namespace shop --pvc data-0 --dest-sc ontap-nas
 
-# SnapMirror, ONTAP to ONTAP. Plan first; the baseline runs with the application online.
+# SnapMirror, ONTAP to ONTAP. Plan first. The baseline runs with the application online.
 tp snapmirror --namespaces shop --dest-svm svm_new --plan-only
 tp snapmirror --namespaces shop --dest-svm svm_new --cutover-only
 
@@ -402,7 +419,7 @@ tp import --namespace shop --server 10.0.0.5 --path /exports/archive \
 
 ### Validation and Rollback
 
-`tp validate` compares counts, sizes and effective modification times by default;
+`tp validate` compares counts, sizes and effective modification times by default.
 `--mode full` (or `strict`) reads every byte on both sides. **Raw block volumes are
 always compared across the full device**: a matching prefix is the absence of
 counter-evidence, not confirmation of a match. Excluded by design: a formatted block
@@ -419,7 +436,7 @@ tp rollback --namespace shop --to-source --session sess-8a21 --yes
 ```
 
 **`--to-source` is a reverse migration, not an undo.** It repoints the application to
-its original volume; data written to the destination since cutover remains there.
+its original volume. Data written to the destination since cutover remains there.
 This is stated explicitly before the operation executes.
 
 ---
@@ -459,10 +476,10 @@ This is stated explicitly before the operation executes.
 
 A StatefulSet owned by an operator must be stopped **through its Custom Resource**,
 or the operator restores it automatically, measured at under one second. Detection
-is by `ownerReferences` and CR name; the registry covers **40 kinds** (PostgreSQL,
+is by `ownerReferences` and CR name. The registry covers **44 kinds** (PostgreSQL,
 MongoDB, MySQL/MariaDB, Kafka, Elasticsearch, OpenSearch, Redis, Valkey, Cassandra,
 ScyllaDB, CockroachDB, TiDB, ClickHouse, Couchbase, MinIO, etcd, RabbitMQ,
-Prometheus and others).
+Prometheus, Alertmanager, ThanosRuler, KubeVirt virtual machines and others).
 
 ```mermaid
 flowchart TD
@@ -471,7 +488,7 @@ flowchart TD
     C -->|yes| D[scale generically,<br/>stated explicitly]
     C -->|no| E[STOP AND WARN<br/>never a blind scale]
     B --> F{Does the CRD refuse<br/>replicas: 0?}
-    F -->|11 of the 40 do| G[scale the workload directly<br/>requires --hold-operator]
+    F -->|13 of the 44 do| G[scale the workload directly<br/>requires --hold-operator]
     F -->|no| H[patch the CR]
     style E fill:#ef6c00,color:#fff
 ```
@@ -490,7 +507,7 @@ reconciles there for the duration of the window.
 
 1. **Native pause, by CR**: a dedicated pause field (`spec.offline`, `spec.stop`).
 2. **Operator hold**: the operator's Deployment to 0, StatefulSet scaled directly.
-3. **Zero, by CR**: patches the CR's own replica field; the operator scales itself down.
+3. **Zero, by CR**: patches the CR's own replica field. The operator scales itself down.
 4. **Orphan + PV Retain**: deletes the owner, with the PV already set to `Retain`.
    Available today for KubeVirt.
 
@@ -498,12 +515,12 @@ reconciles there for the duration of the window.
 
 ECK refuses a change of storage class on a running claim, and Strimzi keeps applying
 the pool's old class to its claims after a swap. For both, the volume swap is not
-used; each has its own route, online for Elasticsearch and Kafka brokers.
+used. Each has its own route, online for Elasticsearch and Kafka brokers.
 
 | Workload | Command | Route | Measured |
 |---|---|---|---|
-| Elasticsearch (ECK) | `tp eck-nodeset` | new node sets on the destination class, old ones retired once the cluster is ready; old volumes set to `Retain` first | Elasticsearch Ready after the move, no outage |
-| Kafka brokers (Strimzi) | `tp strimzi-pool` | a new `KafkaNodePool` on the destination class; partitions move by Cruise Control or by Kafka's own reassignment, then the old pool is removed | Kafka Ready |
+| Elasticsearch (ECK) | `tp eck-nodeset` | new node sets on the destination class, old ones retired once the cluster is ready. Old volumes set to `Retain` first | Elasticsearch Ready after the move, no outage |
+| Kafka brokers (Strimzi) | `tp strimzi-pool` | a new `KafkaNodePool` on the destination class. Partitions move by Cruise Control or by Kafka's own reassignment, then the old pool is removed | Kafka Ready |
 | Kafka controllers (Strimzi) | `tp strimzi-stopped` | Kafka paused, same nodes copied to the destination class and swapped, then resumed | Kafka Ready, stopped or with `--live-sync` |
 
 In a namespace that also holds other claims, these claims take their route and the
@@ -512,31 +529,32 @@ rest follow the chosen mode in the same run. Each command has `plan` and `status
 ### Validated Compatibility, by Operator Kind
 
 Every migration path is measured end to end against a real cluster before it is
-published as supported. `✅` denotes a validated, production-ready path; `Native route · measured` marks a kind moved by
+published as supported. `✅` denotes a validated, production-ready path. `Native route · measured` marks a kind moved by
 its own route (see [Native Routes](#elasticsearch-eck-and-kafka-strimzi-native-routes)),
-measured on a real cluster; `excluded` marks a deliberate scope decision.
+measured on a real cluster. `excluded` marks a deliberate scope decision.
 
 Each entry lists the mechanism applied (1–4 above, or `generic` for kinds without a
 dedicated CRD path) alongside its validation status.
 
 | Kind | Mechanism · Status | Kind | Mechanism · Status |
 |---|---|---|---|
-| `Artifactory` | generic · ✅ | `CassandraDatacenter` | 2 · ✅ |
-| `CephCluster` (Rook) | excluded | `CouchDB` | generic · ✅ |
-| `CrdbCluster` (CockroachDB) | 2 · ✅ | `Dragonfly` | 3 · ✅ |
-| `Elasticsearch` | Native route · measured | `Gitea` | generic · ✅ |
-| `Harbor` | generic · ✅ | `KafkaNodePool` | Native route · measured |
-| `MariaDB` | 3 · ✅ | `Milvus` | 3 · ✅ |
-| `MySQLCluster` (MOCO) | 1 · ✅ | `MysqlCluster` (Presslabs) | 3 · ✅ |
-| `NATS` | generic · ✅ | `Neo4j` | generic · ✅ |
-| `PerconaServerMongoDB` | 3 · ✅ | `PerconaXtraDBCluster` | 3 · ✅ |
-| `RabbitmqCluster` | 3 · ✅ | `Seaweed` | 2 · ✅ |
-| `TemporalCluster` | 2 · ✅ | `Vault` | excluded |
-| `VirtualMachine` (KubeVirt) | 4 · ✅ | `VMCluster` | 1 · ✅ |
-| `postgresql` (Zalando) | 3 · ✅ |  |  |
+| `Artifactory` | generic · ✅ | `CephCluster` (Rook) | excluded |
+| `CouchDB` | generic · ✅ | `CrdbCluster` (CockroachDB) | 2 · ✅ |
+| `Dragonfly` | 3 · ✅ | `Elasticsearch` | Native route · measured |
+| `Gitea` | generic · ✅ | `Harbor` | generic · ✅ |
+| `KafkaNodePool` | Native route · measured | `MariaDB` | 3 · ✅ |
+| `Milvus` | 3 · ✅ | `MySQLCluster` (MOCO) | 1 · ✅ |
+| `MysqlCluster` (Presslabs) | 3 · ✅ | `NATS` | generic · ✅ |
+| `Neo4j` | generic · ✅ | `PerconaServerMongoDB` | 3 · ✅ |
+| `PerconaXtraDBCluster` | 3 · ✅ | `RabbitmqCluster` | 3 · ✅ |
+| `Seaweed` | 2 · ✅ | `TemporalCluster` | 2 · ✅ |
+| `Vault` | excluded | `VirtualMachine` (KubeVirt) | 4 · ✅ |
+| `VMCluster` | 1 · ✅ | `postgresql` (Zalando) | 3 · ✅ |
 
-**23 validated paths: 21 production-ready, plus 2 native routes**, each measured clean end to end against a
+**22 validated paths: 20 production-ready, plus 2 native routes**, each measured clean end to end against a
 real cluster.
+
+The other kinds of the registry are not in this table because none of them has been run end to end on a cluster. That includes `CassandraDatacenter`, whose stop changed after its earlier run and has not been measured since, `ThanosRuler`, `ClickHouseKeeperInstallation`, `OpenshiftArtifactoryHa`, `Keycloak`, `NexusRepo`, `Hazelcast` and `ActiveMQArtemis`. A kind that is not here is not claimed as validated.
 
 `VirtualMachine`'s disk migrates through its own dedicated DataVolume swap
 (`tp compat kv-dv-swap.sh swap <ns> <vm> <datavolume> <target-pv> <target-sc>`),
@@ -559,12 +577,12 @@ those dependencies' volumes, completes cleanly end to end.
 
 ## Operational Safeguards
 
-- **Infrastructure namespaces** are protected by default; `--i-know-this-is-infrastructure`
+- **Infrastructure namespaces** are protected by default. `--i-know-this-is-infrastructure`
   is required to proceed, stopping workloads in a namespace running storage
   infrastructure removes volumes rather than quiescing them.
 - **A namespace under active GitOps reconciliation (Argo CD or Flux)** is detected.
   An Argo CD Application with automated sync is suspended by the run itself (its
-  sync policy is saved in the session) and handed back with `tp gitops resume`; see
+  sync policy is saved in the session) and handed back with `tp gitops resume`. See
   [Argo CD and GitOps](#argo-cd-and-gitops). When it cannot be suspended, Flux, an
   Application without automated sync, or one that cannot be read, the operation is
   declined, naming the owning resource and the exact suspend command.
@@ -596,7 +614,7 @@ it is changed.
 1. Run the migration. The Application is suspended by the run itself.
 2. `tp gitops status --session <id>` lists what is left to change in Git.
 3. `tp gitops bundle --session <id> --out <dir>` writes the change and an `apply.py`
-   that you run inside your own clone of the repository, with your own credentials;
+   that you run inside your own clone of the repository, with your own credentials.
    commit, push and merge it as usual. This is the path for private repositories.
    For a repository readable without a credential, `tp gitops apply --session <id> >
    change.patch` produces the same change as a patch for `git am`.
@@ -605,13 +623,13 @@ it is changed.
      manifest, and only when exactly one place matches.
    - **When it cannot:** an Application with several sources or a config-management
      plugin, a layout it does not recognise, or several values that match. That
-     change is listed as `unknown` and nothing is edited; make it by hand.
-4. `tp gitops sync --session <id>` prints the Argo CD sync command; add `--yes` to run it.
+     change is listed as `unknown` and nothing is edited. Make it by hand.
+4. `tp gitops sync --session <id>` prints the Argo CD sync command. Add `--yes` to run it.
 5. `tp gitops resume --session <id> --yes` gives the Application back its automated
    sync policy.
 
 For a StatefulSet, `tp gitops sts-vct --session <id> --yes` recreates it with its
-`volumeClaimTemplates` on the new class (pods and claims stay); Argo CD recreated it
+`volumeClaimTemplates` on the new class (pods and claims stay). Argo CD recreated it
 from Git, Synced and Healthy.
 
 For several namespaces at once, `--namespaces a b c` replaces `--session`, and
@@ -621,7 +639,7 @@ ApplicationSet: the change goes in the ApplicationSet's own source. The same ste
 in the web interface under the migration's **Git change** tab and in **Bulk**.
 
 Trident Port never writes to your repository. You run `apply.py` in your clone and push
-with your own credential; the Application stays suspended until you resume it.
+with your own credential. The Application stays suspended until you resume it.
 
 Measured against a real Argo CD on OpenShift (13 and 14 Oct 2026) and on vSphere CSI
 with k3s (29 Oct 2026): status, change package, merge, StatefulSet recreation, sync and
@@ -643,9 +661,9 @@ of the binding being replaced, and false of its replacement:
 
 | Dropped | Rationale |
 |---|---|
-| `pv.kubernetes.io/*`, `volume.kubernetes.io/*`, `volume.beta.kubernetes.io/*` | written by the binding machinery; the API server writes its own on the new claim |
+| `pv.kubernetes.io/*`, `volume.kubernetes.io/*`, `volume.beta.kubernetes.io/*` | written by the binding machinery. The API server writes its own on the new claim |
 | `trident.netapp.io/*` | Trident's record of a prior SnapMirror import, true of the volume just imported onto, false of the one it is migrating to |
-| `kubectl.kubernetes.io/last-applied-configuration` | describes the object as declared before the migration; a later `kubectl apply` would diff against a spec that no longer exists |
+| `kubectl.kubernetes.io/last-applied-configuration` | describes the object as declared before the migration. A later `kubectl apply` would diff against a spec that no longer exists |
 
 Every deliberately dropped annotation is named in the migration report, distinguishing
 an intentional design decision from data loss.
@@ -658,7 +676,7 @@ an intentional design decision from data loss.
   validity, tier and limit, verified ledger entries, audit counters.
 - **`tracking/trace.jsonl`**: append-only JSON lines, a unified record for the CLI
   and the web interface, including every refusal. Suitable for SIEM ingestion.
-- **`tracking/sessions/<id>/`**: the plan, per-phase logs and trace for every run;
+- **`tracking/sessions/<id>/`**: the plan, per-phase logs and trace for every run.
   the basis of a support bundle.
 
 ---
@@ -671,7 +689,7 @@ an intentional design decision from data loss.
 | `tp auto` against an infrastructure namespace | Declined by default, requiring `--i-know-this-is-infrastructure` | Stopping workloads where storage itself runs can remove volumes rather than quiesce them. Requires explicit acknowledgment |
 | A namespace under active Argo CD/Flux reconciliation | An Argo CD Application with automated sync is suspended by the run. Flux, an Application without automated sync, or one that cannot be read is declined, naming the owning resource and the exact suspend command | Suspend it as printed, or use `--allow-gitops` to proceed without suspending (the controller can recreate a claim on the source class during the swap) |
 | `--dry-run` performs no changes | Enforced at the engine level | Any state change during a rehearsal is treated as a defect |
-| A long-running copy shows no progress percentage | A status line is emitted on a fixed interval, with elapsed time and the exact command to follow the live log | rsync-based transfers cannot produce a reliable ETA; progress is reported by interval instead |
+| A long-running copy shows no progress percentage | A status line is emitted on a fixed interval, with elapsed time and the exact command to follow the live log | rsync-based transfers cannot produce a reliable ETA. Progress is reported by interval instead |
 
 **A successful migration** is confirmed when `tp validate` agrees with the
 byte-level checksum comparison, the migration report shows all cutover phases
