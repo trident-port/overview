@@ -153,7 +153,7 @@ The step-by-step guides ship inside those files and are also here:
 [`docs/INSTALL-OPERATOR-ONLINE.md`](docs/INSTALL-OPERATOR-ONLINE.md). Every block in
 them can be pasted as it is. You edit your own values once, at the start.
 
-Current release: **v1.2.12**.
+Current release: **v1.2.13**.
 
 ### Before you start
 
@@ -587,6 +587,17 @@ in the web interface under the migration's **Git change** tab and in **Bulk**.
 
 Trident Port never writes to your repository. You run `apply.py` in your clone and push
 with your own credential. The Application stays suspended until you resume it.
+
+**Flux.** The same steps apply to a namespace Flux reconciles. Measured on k3s with
+Flux v2, 17 Nov 2026, each with a migration, the data read back intact and a rollback:
+a Kustomization from a GitRepository; a HelmRelease from an HTTP HelmRepository; a
+HelmRelease from an OCI HelmRepository; a Kustomization from an OCIRepository;
+`dependsOn` between Kustomizations; and a rollback while Git still names the source
+class. A rollback after Git has already moved to the destination class finishes with
+exit 9 (done, operator action pending) and says what is left: Git has to be reverted
+before the Flux object is given back. A HelmRelease whose `spec.values` has no single
+key holding the class is not edited: the change is listed as one to make by hand,
+naming the HelmRelease, its chart and its source.
 
 ---
 
